@@ -1,0 +1,41 @@
+/scratch/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*credentials*.json
+gcp-key*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend (Phase 1+)
+node_modules/
+dist/
+build/
+.next/
+.vite/
+
+# Local data / cache
+*.db
+*.sqlite3
+/data/
+/.cache/
+/output/
+.coverage
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

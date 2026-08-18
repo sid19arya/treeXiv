@@ -1,0 +1,49 @@
+"""Shared fixtures: sample OpenAlex work payloads and a test-only Settings instance."""
+
+from __future__ import annotations
+
+import pytest
+
+from treexiv.config import Settings
+
+
+def make_work_payload(
+    work_id: str,
+    title: str,
+    *,
+    year: int = 2020,
+    cited_by_count: int = 0,
+    referenced_works: list[str] | None = None,
+    abstract_words: dict[str, list[int]] | None = None,
+    authors: list[str] | None = None,
+    venue: str | None = "Test Venue",
+) -> dict:
+    """Build a minimal but realistic OpenAlex `/works` item payload."""
+    return {
+        "id": f"https://openalex.org/{work_id}",
+        "display_name": title,
+        "publication_year": year,
+        "cited_by_count": cited_by_count,
+        "authorships": [
+            {"author": {"display_name": name}} for name in (authors or ["Alice Example"])
+        ],
+        "primary_location": {"source": {"display_name": venue}} if venue else {},
+        "doi": f"https://doi.org/10.0000/{work_id.lower()}",
+        "referenced_works": [
+            f"https://openalex.org/{rid}" for rid in (referenced_works or [])
+        ],
+        "abstract_inverted_index": abstract_words,
+    }
+
+
+@pytest.fixture
+def settings() -> Settings:
+    return Settings(
+        mailto="test@example.com",
+        api_key=None,
+        total_corpus_cap=500,
+        per_node_fanout_cap=100,
+        bm25_top_k=40,
+        max_retries=1,
+        cache_dir=None,
+    )
