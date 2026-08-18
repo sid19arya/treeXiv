@@ -1,5 +1,8 @@
 /scratch/
 
+# Local-only dev guidance, not published
+/CLAUDE.md
+
 # Environment / secrets
 .env
 .env.*
