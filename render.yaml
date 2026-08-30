@@ -1,0 +1,39 @@
+# Render Blueprint — private TreeXiv web front-end (free tier).
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Every route except /health is behind HTTP Basic Auth. Set the four
+# `sync: false` vars when Render prompts during Blueprint creation:
+#   OPENALEX_API_KEY   — your OpenAlex key
+#   OPENALEX_MAILTO    — your email (OpenAlex polite-pool header)
+#   TREEXIV_WEB_USER   — any username
+#   TREEXIV_WEB_PASSWORD — a long random string, e.g.
+#       python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+services:
+  - name: treexiv
+    type: web
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: "uv sync --frozen --no-dev --extra web"
+    startCommand: "uv run --no-sync uvicorn treexiv.web:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: UV_VERSION
+        value: "0.11.24"
+      - key: OPENALEX_API_KEY
+        sync: false
+      - key: OPENALEX_MAILTO
+        sync: false
+      - key: TREEXIV_WEB_USER
+        sync: false
+      - key: TREEXIV_WEB_PASSWORD
+        sync: false
+      - key: TREEXIV_TOTAL_CORPUS_CAP
+        value: "400"
+      - key: TREEXIV_FANOUT_CAP
+        value: "60"
+      - key: TREEXIV_BM25_TOP_K
+        value: "40"

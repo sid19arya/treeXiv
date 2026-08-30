@@ -18,6 +18,14 @@ Homepage = "https://github.com/sid19arya/treeXiv"
 [project.scripts]
 treexiv = "treexiv.cli:entry_point"
 
+# Optional: the private web front-end deployed to Render (see README "Deploy").
+# Deliberately not a core dependency — the Phase 0 CLI/skill never import these.
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

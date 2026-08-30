@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TreeXiv</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --border: #e3e3df; --text: #1a1a17;
+    --muted: #6b6b63; --accent: #b5731a; --accent-soft: #fbefdd;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; font-size: 13px; }
+  .step { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px; margin-bottom: 18px; }
+  .step[hidden] { display: none; }
+  .step h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); margin: 0 0 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input[type=text], textarea {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px;
+    font: inherit; background: #fff; color: var(--text); }
+  textarea { min-height: 74px; resize: vertical; }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; }
+  button { font: inherit; font-weight: 600; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; border-radius: 7px; padding: 9px 16px;
+    cursor: pointer; }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .candidates { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .cand { text-align: left; width: 100%; background: #fff; color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-weight: 400; }
+  .cand:hover { border-color: var(--accent); background: #fffdfa; }
+  .cand .t { font-weight: 600; font-size: 14px; }
+  .cand .m { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .selected { background: var(--accent-soft); border: 1px solid #e6c99b; border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; }
+  details { margin-top: 12px; } summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .adv { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .adv > div { flex: 1; min-width: 120px; }
+  .msg { font-size: 13px; margin-top: 12px; }
+  .msg.err { color: #b3261e; }
+  .msg.work { color: var(--muted); }
+  .result { border-color: #cfe3cf; background: #f4faf4; }
+  .result .stat { font-size: 13px; color: var(--muted); margin: 4px 0 14px; }
+  .result .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  a.dl { align-self: center; font-size: 13px; color: var(--accent); }
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #ccc;
+    border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+    vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<main>
+  <h1>TreeXiv</h1>
+  <p class="sub">Trace a paper's citation lineage. Search a seed paper, state the idea you
+    care about, get an interactive graph.</p>
+
+  <section class="step">
+    <h2>1 · Find the seed paper</h2>
+    <form id="search-form" class="row">
+      <input type="text" id="q" placeholder="Title, DOI, or arXiv ID" autocomplete="off" required>
+      <button type="submit" id="search-btn">Search</button>
+    </form>
+    <div class="candidates" id="candidates"></div>
+    <div class="msg" id="search-msg"></div>
+  </section>
+
+  <section class="step" id="step2" hidden>
+    <h2>2 · State the core idea &amp; generate</h2>
+    <div class="selected" id="selected"></div>
+    <label for="idea">Core idea to trace (drives relevance filtering — need not be the abstract)</label>
+    <textarea id="idea" placeholder="e.g. self-attention mechanisms for sequence modeling"></textarea>
+    <details>
+      <summary>Advanced</summary>
+      <div class="adv">
+        <div><label for="top_k">Keep top-K</label>
+          <input type="text" id="top_k" placeholder="40" inputmode="numeric"></div>
+        <div><label for="total_cap">Total cap</label>
+          <input type="text" id="total_cap" placeholder="400" inputmode="numeric"></div>
+        <div><label for="fanout_cap">Fan-out cap</label>
+          <input type="text" id="fanout_cap" placeholder="60" inputmode="numeric"></div>
+      </div>
+    </details>
+    <div style="margin-top:14px">
+      <button type="button" id="run-btn">Generate lineage</button>
+    </div>
+    <div class="msg" id="run-msg"></div>
+  </section>
+
+  <section class="step result" id="result" hidden>
+    <h2>Lineage graph</h2>
+    <div id="resolved" class="stat"></div>
+    <div id="counts" class="stat"></div>
+    <div class="actions">
+      <button type="button" id="open-btn">Open graph &#8599;</button>
+      <a class="dl" id="dl" download>Download HTML</a>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  var selected = null;
+  var blobUrl = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function setMsg(el, text, cls) {
+    el.className = "msg" + (cls ? " " + cls : "");
+    el.innerHTML = text;
+  }
+
+  async function api(path, opts) {
+    var res = await fetch(path, opts);
+    if (!res.ok) {
+      var detail = res.status + " " + res.statusText;
+      try { var j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    return res.json();
+  }
+
+  $("search-form").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var q = $("q").value.trim();
+    if (q.length < 2) return;
+    $("search-btn").disabled = true;
+    $("candidates").innerHTML = "";
+    setMsg($("search-msg"), '<span class="spinner"></span>Searching OpenAlex…', "work");
+    try {
+      var list = await api("/api/search?q=" + encodeURIComponent(q));
+      setMsg($("search-msg"), list.length ? "" : "No matches.", "");
+      list.forEach(function (c) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "cand";
+        var authors = (c.authors || []).slice(0, 3).join(", ") +
+          ((c.authors || []).length > 3 ? ", et al." : "");
+        b.innerHTML = '<div class="t"></div><div class="m"></div>';
+        b.querySelector(".t").textContent = c.title;
+        b.querySelector(".m").textContent =
+          [authors, c.venue, c.publication_year].filter(Boolean).join(" · ") +
+          " · " + (c.cited_by_count || 0) + " citations · " + c.id;
+        b.addEventListener("click", function () { pick(c); });
+        $("candidates").appendChild(b);
+      });
+    } catch (err) {
+      setMsg($("search-msg"), "Error: " + err.message, "err");
+    } finally {
+      $("search-btn").disabled = false;
+    }
+  });
+
+  function pick(c) {
+    selected = c;
+    $("selected").textContent =
+      "Seed: " + c.title + (c.publication_year ? " (" + c.publication_year + ")" : "") +
+      " — " + c.id;
+    $("step2").hidden = false;
+    $("result").hidden = true;
+    $("step2").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  function intOrNull(id) {
+    var v = $(id).value.trim();
+    if (!v) return null;
+    var n = parseInt(v, 10);
+    return isNaN(n) ? null : n;
+  }
+
+  $("run-btn").addEventListener("click", async function () {
+    if (!selected) return;
+    var idea = $("idea").value.trim();
+    if (!idea) { setMsg($("run-msg"), "Enter a core idea first.", "err"); return; }
+    $("run-btn").disabled = true;
+    setMsg($("run-msg"),
+      '<span class="spinner"></span>Expanding the citation graph and filtering — ' +
+      'this usually takes 20–60s (longer on a cold start)…', "work");
+    try {
+      var body = {
+        work_id: selected.id, idea: idea,
+        top_k: intOrNull("top_k"),
+        total_cap: intOrNull("total_cap"),
+        fanout_cap: intOrNull("fanout_cap")
+      };
+      var data = await api("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      setMsg($("run-msg"), "", "");
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      blobUrl = URL.createObjectURL(new Blob([data.html], { type: "text/html" }));
+      $("resolved").textContent =
+        "Resolved to: " + data.seed_title +
+        (data.seed_year ? " (" + data.seed_year + ")" : "") +
+        " — check this is the paper you meant.";
+      $("counts").textContent =
+        data.expanded + " papers expanded → " + data.kept + " kept · " +
+        data.edges + " edges" + (data.truncated ? " · expansion hit a cap" : "");
+      var dl = $("dl");
+      dl.href = blobUrl;
+      dl.setAttribute("download", "treexiv-" + data.seed_id + ".html");
+      $("result").hidden = false;
+      $("result").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (err) {
+      setMsg($("run-msg"), "Error: " + err.message, "err");
+    } finally {
+      $("run-btn").disabled = false;
+    }
+  });
+
+  $("open-btn").addEventListener("click", function () {
+    if (blobUrl) window.open(blobUrl, "_blank");
+  });
+})();
+</script>
+</body>
+</html>
