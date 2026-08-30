@@ -64,6 +64,39 @@ uv run treexiv run W2626778328 \
 Run `uv run treexiv --help` for the full command list (`search-seed`,
 `expand`, `filter`, `render`, `run`).
 
+## Deploy as a private web app (optional)
+
+There's a single-page web front-end (`treexiv.web`, a small FastAPI app) that
+wraps the same pipeline: search a seed, pick the right match, state the idea,
+get the HTML back in the browser. It's built to run on
+[Render](https://render.com)'s free tier and is **private** — every route
+except `/health` is behind HTTP Basic Auth, so without your credentials a
+request gets a `401` and nothing runs.
+
+Run it locally:
+
+```bash
+uv sync --extra web
+TREEXIV_WEB_USER=me TREEXIV_WEB_PASSWORD=secret \
+  uv run uvicorn treexiv.web:app --reload
+# open http://127.0.0.1:8000
+```
+
+Deploy to Render: the repo ships a `render.yaml` Blueprint. In the Render
+dashboard, **New → Blueprint**, point it at your fork, and provide the four
+prompted secrets:
+
+| Secret | Value |
+|---|---|
+| `OPENALEX_API_KEY` | your OpenAlex key |
+| `OPENALEX_MAILTO` | your email (OpenAlex polite-pool header) |
+| `TREEXIV_WEB_USER` | any username |
+| `TREEXIV_WEB_PASSWORD` | a long random string — `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+
+First load prompts for the username/password once; the browser caches it for
+the session. Free-tier services spin down after 15 minutes idle and take
+~1 minute to wake on the next request.
+
 ## How it works
 
 1. **Resolve** — your seed reference (title, DOI, or arXiv ID) is matched to
