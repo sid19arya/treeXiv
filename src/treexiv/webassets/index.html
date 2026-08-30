@@ -117,15 +117,46 @@
     el.innerHTML = text;
   }
 
-  async function api(path, opts) {
-    var res = await fetch(path, opts);
-    if (!res.ok) {
+  var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+
+  // Render's free tier spins the service down after 15 min idle. While it
+  // wakes (~1 min) a fetch() gets a 404 (x-render-routing: no-server) or a
+  // 5xx rather than the browser "waking up" page. Ride that out instead of
+  // surfacing it as an error.
+  async function api(path, opts, onWaking) {
+    var deadline = Date.now() + 120000;
+    while (true) {
+      var res;
+      try {
+        res = await fetch(path, opts);
+      } catch (e) {
+        if (Date.now() > deadline) throw new Error("can't reach the server");
+        if (onWaking) onWaking();
+        await sleep(3000);
+        continue;
+      }
+      if (res.ok) return res.json();
+      var transient = [404, 502, 503, 504].indexOf(res.status) !== -1;
+      if (transient && Date.now() < deadline) {
+        if (onWaking) onWaking();
+        await sleep(3000);
+        continue;
+      }
       var detail = res.status + " " + res.statusText;
       try { var j = await res.json(); if (j.detail) detail = j.detail; } catch (e) {}
       throw new Error(detail);
     }
-    return res.json();
   }
+
+  var wakingMsg = function (el) {
+    return function () {
+      setMsg(el, '<span class="spinner"></span>Waking the server (free tier sleeps ' +
+        'when idle) — up to a minute…', "work");
+    };
+  };
+
+  // Kick off spin-up now, while the user is still typing their query.
+  fetch("/health").catch(function () {});
 
   $("search-form").addEventListener("submit", async function (e) {
     e.preventDefault();
@@ -135,7 +166,8 @@
     $("candidates").innerHTML = "";
     setMsg($("search-msg"), '<span class="spinner"></span>Searching OpenAlex…', "work");
     try {
-      var list = await api("/api/search?q=" + encodeURIComponent(q));
+      var list = await api("/api/search?q=" + encodeURIComponent(q), undefined,
+        wakingMsg($("search-msg")));
       setMsg($("search-msg"), list.length ? "" : "No matches.", "");
       list.forEach(function (c) {
         var b = document.createElement("button");
@@ -194,7 +226,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
-      });
+      }, wakingMsg($("run-msg")));
       setMsg($("run-msg"), "", "");
       if (blobUrl) URL.revokeObjectURL(blobUrl);
       blobUrl = URL.createObjectURL(new Blob([data.html], { type: "text/html" }));
