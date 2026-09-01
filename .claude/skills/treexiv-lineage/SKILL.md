@@ -20,10 +20,29 @@ calls the PRD assigns to Step 1 — this skill is that missing piece. See
   to be rate-limited.
 - Run all commands from the repo root as `uv run treexiv <subcommand> ...`.
 
+## Step 0 — (optional) Identify the seed from a vague description
+
+Only when the user *doesn't* have a specific paper in mind — they describe an
+idea/finding/era instead of naming a paper. If they already gave a title, DOI,
+or arXiv ID, skip straight to Step 1.
+
+Run `uv run treexiv identify-seed "<the user's description>"`. This calls a
+web-search-grounded OpenRouter model (`OPENROUTER_API_KEY` required — see
+`README.md`) and prints a JSON object: `search_query` (feed this into Step 2),
+plus `title`, `arxiv_id`, `doi`, `year`, `confidence`, `reasoning`,
+`alternatives`, and `sources` (URLs it consulted).
+
+Treat it as a *lead, not an answer*: still run Step 2's `search-seed` on the
+`search_query`, still do the Step 2 cross-check, and if `confidence` is
+`low`/`medium` or `alternatives` is non-empty, show the user what it guessed
+(and the alternatives) before proceeding. If the guess looks wrong, ask the
+user to describe the paper differently or name it directly.
+
 ## Step 1 — Get the seed paper and the core idea from the user
 
 If either is missing, ask for it directly:
-- The seed paper: a title, DOI, or arXiv ID is all fine.
+- The seed paper: a title, DOI, or arXiv ID is all fine. (Or run Step 0 if the
+  user can only describe it.)
 - The "core idea": a short free-text description of what the user actually
   cares about tracing (this drives BM25 filtering in Step 4 below — it does
   not need to be the seed paper's own abstract).

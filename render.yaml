@@ -1,13 +1,16 @@
 # Render Blueprint — private TreeXiv web front-end (free tier).
 # Docs: https://render.com/docs/blueprint-spec
 #
-# Every route except /health is behind HTTP Basic Auth. Set the four
-# `sync: false` vars when Render prompts during Blueprint creation:
+# Every route except /health is behind HTTP Basic Auth. Set the `sync: false`
+# vars when Render prompts during Blueprint creation:
 #   OPENALEX_API_KEY   — your OpenAlex key
 #   OPENALEX_MAILTO    — your email (OpenAlex polite-pool header)
 #   TREEXIV_WEB_USER   — any username
 #   TREEXIV_WEB_PASSWORD — a long random string, e.g.
 #       python -c "import secrets; print(secrets.token_urlsafe(32))"
+#   OPENROUTER_API_KEY — for the optional Step 0 "identify paper" feature.
+#       Leave blank to disable it (that route then returns 501; the rest of
+#       the app is unaffected).
 
 services:
   - name: treexiv
@@ -31,6 +34,10 @@ services:
         sync: false
       - key: TREEXIV_WEB_PASSWORD
         sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: "z-ai/glm-5.3-flash"
       - key: TREEXIV_TOTAL_CORPUS_CAP
         value: "400"
       - key: TREEXIV_FANOUT_CAP

@@ -5,6 +5,11 @@ one module, opt-in via the `web` extra, reusing the exact same package
 functions the CLI does. It exists only to run the pipeline behind a browser
 form on Render's free tier — nothing here changes the core package.
 
+The optional Step 0 (``/api/identify``) is the one route that reaches past
+OpenAlex: it calls an OpenRouter model to turn a vague description into a
+seed-paper lead, and returns 501 if ``OPENROUTER_API_KEY`` is unset so the
+rest of the app still works without it.
+
 Every route except ``/health`` sits behind HTTP Basic Auth
 (``TREEXIV_WEB_USER`` / ``TREEXIV_WEB_PASSWORD`` env vars). Without valid
 credentials a request gets a 401 and the pipeline never runs — no OpenAlex
@@ -24,6 +29,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -35,6 +41,7 @@ from treexiv.expand import expand_two_hop
 from treexiv.filtering import filter_by_idea
 from treexiv.openalex import OpenAlexClient
 from treexiv.render import render_html
+from treexiv.seed_llm import identify_seed
 
 # Hard ceilings on caller-supplied knobs. Even an authenticated request (or a
 # leaked credential) can't turn one call into a multi-thousand-request
@@ -85,6 +92,23 @@ def _openalex_client() -> Iterator[OpenAlexClient]:
 ClientDep = Annotated[OpenAlexClient, Depends(_openalex_client)]
 
 
+def _openrouter_http() -> Iterator[httpx.Client]:
+    """Request-scoped HTTP client for the Step 0 OpenRouter call. Overridden in tests."""
+    settings = Settings.from_env()
+    with httpx.Client(
+        base_url=settings.openrouter_base_url, timeout=settings.llm_timeout_seconds
+    ) as client:
+        yield client
+
+
+OpenRouterDep = Annotated[httpx.Client, Depends(_openrouter_http)]
+
+
+class IdentifyRequest(BaseModel):
+    description: str = Field(min_length=3, max_length=2000)
+    web: bool | None = None
+
+
 class RunRequest(BaseModel):
     work_id: str = Field(min_length=1)
     idea: str = Field(min_length=1)
@@ -121,6 +145,28 @@ def health() -> dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 def index(_: AuthDep) -> HTMLResponse:
     return HTMLResponse(_INDEX_HTML)
+
+
+@app.post("/api/identify")
+def identify(_: AuthDep, http: OpenRouterDep, req: IdentifyRequest) -> JSONResponse:
+    """Step 0: guess which paper a free-text description refers to (OpenRouter).
+
+    Returns the same shape as `treexiv identify-seed` — a lead, not a
+    resolution; the caller still runs `/api/search` on `search_query`.
+    """
+    settings = Settings.from_env()
+    if not settings.openrouter_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Seed identification is not configured (OPENROUTER_API_KEY unset).",
+        )
+    try:
+        guess = identify_seed(
+            req.description, settings, web_search=req.web, http_client=http
+        )
+    except TreeXivError as exc:
+        raise HTTPException(status_code=502, detail=f"Identify error: {exc}") from exc
+    return JSONResponse(guess.to_dict())
 
 
 @app.get("/api/search")

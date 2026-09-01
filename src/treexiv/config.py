@@ -22,6 +22,22 @@ DEFAULT_BASE_URL = "https://api.openalex.org"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_RETRIES = 3
 
+# Step 0 (`treexiv identify-seed`): an OpenRouter chat model, web-search
+# grounded, that turns a vague description into a concrete seed-paper lead.
+# Only touched when that subcommand runs — the rest of the pipeline never
+# imports an LLM client.
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_MODEL = "z-ai/glm-5.3-flash"
+DEFAULT_LLM_WEB_SEARCH = True
+DEFAULT_LLM_TIMEOUT_SECONDS = 120.0
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -41,6 +57,11 @@ class Settings:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_MAX_RETRIES
     cache_dir: str | None = None
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = DEFAULT_OPENROUTER_BASE_URL
+    openrouter_model: str = DEFAULT_OPENROUTER_MODEL
+    llm_web_search: bool = DEFAULT_LLM_WEB_SEARCH
+    llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -48,7 +69,8 @@ class Settings:
 
         Recognized variables: OPENALEX_API_KEY, OPENALEX_MAILTO,
         TREEXIV_TOTAL_CORPUS_CAP, TREEXIV_FANOUT_CAP, TREEXIV_SAMPLING_STRATEGY,
-        TREEXIV_BM25_TOP_K, TREEXIV_CACHE_DIR.
+        TREEXIV_BM25_TOP_K, TREEXIV_CACHE_DIR, OPENROUTER_API_KEY,
+        OPENROUTER_BASE_URL, OPENROUTER_MODEL, TREEXIV_LLM_WEB_SEARCH.
         """
         load_dotenv()
         return cls(
@@ -65,4 +87,10 @@ class Settings:
             ),
             bm25_top_k=int(os.getenv("TREEXIV_BM25_TOP_K", DEFAULT_BM25_TOP_K)),
             cache_dir=os.getenv("TREEXIV_CACHE_DIR") or None,
+            openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
+            openrouter_base_url=(
+                os.getenv("OPENROUTER_BASE_URL") or DEFAULT_OPENROUTER_BASE_URL
+            ),
+            openrouter_model=os.getenv("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL,
+            llm_web_search=_env_bool("TREEXIV_LLM_WEB_SEARCH", DEFAULT_LLM_WEB_SEARCH),
         )

@@ -28,6 +28,7 @@ Handler = Callable[[httpx.Request], httpx.Response]
 def _auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TREEXIV_WEB_USER", "u")
     monkeypatch.setenv("TREEXIV_WEB_PASSWORD", "p")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
 
 
 @pytest.fixture
@@ -43,6 +44,16 @@ def _use_openalex(handler: Handler) -> None:
         return OpenAlexClient(Settings(max_retries=1), http_client=http)
 
     web.app.dependency_overrides[web._openalex_client] = _dep
+
+
+def _use_openrouter(handler: Handler) -> None:
+    def _dep() -> httpx.Client:
+        return httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    web.app.dependency_overrides[web._openrouter_http] = _dep
 
 
 @pytest.fixture(autouse=True)
@@ -107,6 +118,58 @@ def test_run_returns_html_and_stats(client: TestClient) -> None:
     assert body["seed_id"] == "W1"
     assert body["kept"] >= 1
     assert "<!doctype html>" in body["html"].lower()
+
+
+def test_identify_returns_guess(client: TestClient) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/chat/completions")
+        assert request.headers["authorization"] == "Bearer sk-or-test"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"search_query": "Attention Is All You Need", '
+                            '"title": "Attention Is All You Need", "confidence": "high"}',
+                        }
+                    }
+                ]
+            },
+        )
+
+    _use_openrouter(handler)
+    r = client.post(
+        "/api/identify",
+        json={"description": "the 2017 transformer paper"},
+        auth=("u", "p"),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["search_query"] == "Attention Is All You Need"
+    assert body["confidence"] == "high"
+
+
+def test_identify_requires_auth(client: TestClient) -> None:
+    r = client.post("/api/identify", json={"description": "something"})
+    assert r.status_code == 401
+
+
+def test_identify_501_when_openrouter_key_unset(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    r = client.post(
+        "/api/identify", json={"description": "the 2017 transformer paper"}, auth=("u", "p")
+    )
+    assert r.status_code == 501
+    assert "OPENROUTER_API_KEY" in r.json()["detail"]
+
+
+def test_identify_rejects_too_short_description(client: TestClient) -> None:
+    r = client.post("/api/identify", json={"description": "x"}, auth=("u", "p"))
+    assert r.status_code == 422
 
 
 def test_run_clamps_oversized_caps(client: TestClient) -> None:

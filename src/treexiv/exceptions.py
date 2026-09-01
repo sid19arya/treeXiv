@@ -19,5 +19,10 @@ class SeedResolutionError(TreeXivError):
     """Raised when a seed paper query cannot be resolved to any candidate."""
 
 
+class SeedIdentificationError(TreeXivError):
+    """Raised when the Step 0 LLM seed-identification call fails or returns
+    output that can't be parsed into a usable lead."""
+
+
 class GraphIOError(TreeXivError):
     """Raised when reading/writing expansion or filtered-graph JSON fails."""

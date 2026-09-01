@@ -41,6 +41,11 @@
   .selected { background: var(--accent-soft); border: 1px solid #e6c99b; border-radius: 8px;
     padding: 10px 12px; font-size: 13px; }
   details { margin-top: 12px; } summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  #guess { margin-top: 12px; }
+  #guess .gt { font-weight: 600; font-size: 14px; }
+  #guess .gm { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  #guess ul { margin: 4px 0 0; padding-left: 18px; }
+  #guess li { font-size: 12px; color: var(--muted); }
   .adv { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
   .adv > div { flex: 1; min-width: 120px; }
   .msg { font-size: 13px; margin-top: 12px; }
@@ -64,6 +69,16 @@
 
   <section class="step">
     <h2>1 · Find the seed paper</h2>
+    <details id="step0-wrap">
+      <summary>Not sure of the exact paper? Describe it &rarr;</summary>
+      <label for="desc">Describe it — topic, key finding, rough era, authors, venue</label>
+      <textarea id="desc" placeholder="e.g. a mid-2010s paper framing dropout as approximate Bayesian inference in neural nets"></textarea>
+      <div style="margin-top:10px">
+        <button type="button" class="secondary" id="identify-btn">Identify paper</button>
+      </div>
+      <div class="msg" id="identify-msg"></div>
+      <div class="selected" id="guess" hidden></div>
+    </details>
     <form id="search-form" class="row">
       <input type="text" id="q" placeholder="Title, DOI, or arXiv ID" autocomplete="off" required>
       <button type="submit" id="search-btn">Search</button>
@@ -158,9 +173,7 @@
   // Kick off spin-up now, while the user is still typing their query.
   fetch("/health").catch(function () {});
 
-  $("search-form").addEventListener("submit", async function (e) {
-    e.preventDefault();
-    var q = $("q").value.trim();
+  async function runSearch(q) {
     if (q.length < 2) return;
     $("search-btn").disabled = true;
     $("candidates").innerHTML = "";
@@ -187,6 +200,73 @@
       setMsg($("search-msg"), "Error: " + err.message, "err");
     } finally {
       $("search-btn").disabled = false;
+    }
+  }
+
+  $("search-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    runSearch($("q").value.trim());
+  });
+
+  function renderGuess(g) {
+    var el = $("guess");
+    el.innerHTML = '<div class="gt"></div><div class="gm gm-reason"></div>' +
+      '<div class="gm gm-ids"></div>';
+    el.querySelector(".gt").textContent =
+      (g.title || g.search_query || "(no guess)") +
+      (g.year ? " (" + g.year + ")" : "") +
+      (g.confidence ? "  ·  " + g.confidence + " confidence" : "");
+    el.querySelector(".gm-reason").textContent = g.reasoning || "";
+    var ids = [];
+    if (g.arxiv_id) ids.push("arXiv:" + g.arxiv_id);
+    if (g.doi) ids.push("DOI:" + g.doi);
+    el.querySelector(".gm-ids").textContent = ids.join("  ·  ");
+    if (g.alternatives && g.alternatives.length) {
+      var h = document.createElement("div");
+      h.className = "gm";
+      h.textContent = "Other possibilities:";
+      var ul = document.createElement("ul");
+      g.alternatives.forEach(function (a) {
+        var li = document.createElement("li");
+        li.textContent = a.title + (a.note ? " — " + a.note : "");
+        ul.appendChild(li);
+      });
+      el.appendChild(h);
+      el.appendChild(ul);
+    }
+    if (g.sources && g.sources.length) {
+      var s = document.createElement("div");
+      s.className = "gm";
+      s.textContent = "Checked: " + g.sources.slice(0, 4).join("  ·  ");
+      el.appendChild(s);
+    }
+    el.hidden = false;
+  }
+
+  $("identify-btn").addEventListener("click", async function () {
+    var desc = $("desc").value.trim();
+    if (desc.length < 3) {
+      setMsg($("identify-msg"), "Describe the paper first.", "err");
+      return;
+    }
+    $("identify-btn").disabled = true;
+    $("guess").hidden = true;
+    setMsg($("identify-msg"),
+      '<span class="spinner"></span>Asking the model (with web search) — ~10–30s…', "work");
+    try {
+      var g = await api("/api/identify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: desc })
+      }, wakingMsg($("identify-msg")));
+      setMsg($("identify-msg"), "", "");
+      renderGuess(g);
+      $("q").value = g.search_query || "";
+      if ($("q").value) runSearch($("q").value);
+    } catch (err) {
+      setMsg($("identify-msg"), "Error: " + err.message, "err");
+    } finally {
+      $("identify-btn").disabled = false;
     }
   });
 

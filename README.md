@@ -16,6 +16,7 @@ TreeXiv turns that into a single request: point it at a paper and a stated inter
 |---|---|
 | `/treexiv-lineage` skill | Drives the whole flow inside Claude Code: resolves your seed paper (cross-checking ambiguous matches with a live web search), runs the pipeline, and hands you the result. |
 | `treexiv` CLI | The engine underneath — OpenAlex traversal, relevance filtering, and rendering, exposed as composable commands for direct/scripted use. |
+| `treexiv identify-seed` | Optional Step 0: don't know the exact paper? Describe it and a web-searching LLM (OpenRouter) guesses the title / arXiv ID and a query to feed the pipeline. |
 
 ## Installation
 
@@ -46,6 +47,14 @@ If your seed paper's title is ambiguous (a lot of papers share near-identical
 titles), the skill will cross-check candidates with a web search and ask you
 to confirm before running anything.
 
+Don't have a specific paper in mind? Describe the idea and let TreeXiv guess
+the paper first:
+
+```
+I'm thinking of a mid-2010s paper that framed dropout as approximate
+Bayesian inference in deep networks — find it and trace its lineage.
+```
+
 You'll get back an interactive HTML file — open it in any browser.
 
 ### Prefer the CLI directly?
@@ -61,29 +70,41 @@ uv run treexiv run W2626778328 \
   --out-json output/filtered.json --out-html output/tree.html
 ```
 
-Run `uv run treexiv --help` for the full command list (`search-seed`,
-`expand`, `filter`, `render`, `run`).
+Only have a fuzzy description? Step 0 turns it into a search:
+
+```bash
+uv run treexiv identify-seed "the 2017 paper that introduced the transformer" \
+  # -> JSON with a "search_query" field; pass that to search-seed
+```
+
+`identify-seed` needs `OPENROUTER_API_KEY` (see Configuration); every other
+command only talks to OpenAlex. Web-search grounding is on by default
+(`--no-web` to disable, or `--model` to override `OPENROUTER_MODEL`).
+
+Run `uv run treexiv --help` for the full command list (`identify-seed`,
+`search-seed`, `expand`, `filter`, `render`, `run`).
 
 ## Deploy as a private web app (optional)
 
 There's a single-page web front-end (`treexiv.web`, a small FastAPI app) that
-wraps the same pipeline: search a seed, pick the right match, state the idea,
-get the HTML back in the browser. It's built to run on
-[Render](https://render.com)'s free tier and is **private** — every route
-except `/health` is behind HTTP Basic Auth, so without your credentials a
-request gets a `401` and nothing runs.
+wraps the same pipeline: search a seed (or describe it and let Step 0 guess),
+pick the right match, state the idea, get the HTML back in the browser. It's
+built to run on [Render](https://render.com)'s free tier and is **private** —
+every route except `/health` is behind HTTP Basic Auth, so without your
+credentials a request gets a `401` and nothing runs.
 
 Run it locally:
 
 ```bash
 uv sync --extra web
 TREEXIV_WEB_USER=me TREEXIV_WEB_PASSWORD=secret \
+OPENROUTER_API_KEY=sk-or-...  `# optional — enables the "describe it" box` \
   uv run uvicorn treexiv.web:app --reload
 # open http://127.0.0.1:8000
 ```
 
 Deploy to Render: the repo ships a `render.yaml` Blueprint. In the Render
-dashboard, **New → Blueprint**, point it at your fork, and provide the four
+dashboard, **New → Blueprint**, point it at your fork, and provide the
 prompted secrets:
 
 | Secret | Value |
@@ -92,6 +113,7 @@ prompted secrets:
 | `OPENALEX_MAILTO` | your email (OpenAlex polite-pool header) |
 | `TREEXIV_WEB_USER` | any username |
 | `TREEXIV_WEB_PASSWORD` | a long random string — `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `OPENROUTER_API_KEY` | optional — enables the Step 0 "describe the paper" box; leave blank and that one feature returns `501` while everything else works |
 
 First load prompts for the username/password once; the browser caches it for
 the session. Free-tier services spin down after 15 minutes idle and take
@@ -99,6 +121,10 @@ the session. Free-tier services spin down after 15 minutes idle and take
 
 ## How it works
 
+0. **Identify** *(optional)* — if you only have a description, not a paper, a
+   web-searching LLM (OpenRouter) guesses which paper you mean and hands back
+   a title / arXiv ID and a query string. It's a lead, not a resolution —
+   step 1 still runs.
 1. **Resolve** — your seed reference (title, DOI, or arXiv ID) is matched to
    one OpenAlex work.
 2. **Expand** — a two-hop traversal in both directions: papers your seed
@@ -138,6 +164,9 @@ handful of requests:
 |---|---|
 | `OPENALEX_API_KEY` | Recommended — avoids aggressive rate limiting |
 | `OPENALEX_MAILTO` | Email for OpenAlex's polite-pool header |
+| `OPENROUTER_API_KEY` | Required for `identify-seed` (Step 0) only; nothing else uses it |
+| `OPENROUTER_MODEL` | Model slug for Step 0 (default `z-ai/glm-5.3-flash`) |
+| `TREEXIV_LLM_WEB_SEARCH` | `true` (default) grounds Step 0 in a web search; `false` disables it |
 | `TREEXIV_TOTAL_CORPUS_CAP` | Global cap on papers collected (default 500) |
 | `TREEXIV_FANOUT_CAP` | Per-paper cap on references/citations followed (default 100) |
 | `TREEXIV_BM25_TOP_K` | How many papers survive relevance filtering (default 40) |
@@ -148,7 +177,8 @@ handful of requests:
 
 TreeXiv is deliberately simple: no database, no embeddings, no background
 jobs. Every run is a fresh, disposable query against live OpenAlex data,
-filtered with BM25 rather than a semantic model. That's a real tradeoff —
+filtered with BM25 rather than a semantic model. The one LLM touchpoint is
+the optional `identify-seed` step, and it only runs when you invoke it. That's a real tradeoff —
 it won't catch a relevant paper that shares no vocabulary with your stated
 idea, and citation coverage varies by field and publisher — but it means
 there's nothing to maintain, nothing to go stale, and a result in seconds

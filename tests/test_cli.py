@@ -11,7 +11,44 @@ from click.testing import CliRunner
 
 from tests.conftest import make_work_payload
 from treexiv.cli import main
+from treexiv.exceptions import SeedIdentificationError
 from treexiv.models import Edge, ExpansionResult, Node
+
+
+@respx.mock
+def test_identify_seed_command_prints_guess_json(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("OPENROUTER_MODEL", "z-ai/glm-5.3-flash")
+    reply = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"search_query": "Attention Is All You Need", "confidence": "high"}
+                    ),
+                }
+            }
+        ]
+    }
+    route = respx.post("https://openrouter.ai/api/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=reply)
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["identify-seed", "the transformer paper", "--no-web"])
+    assert result.exit_code == 0, result.output
+    assert route.called
+    guess = json.loads(result.output)
+    assert guess["search_query"] == "Attention Is All You Need"
+
+
+def test_identify_seed_command_errors_without_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    runner = CliRunner()
+    result = runner.invoke(main, ["identify-seed", "the transformer paper"])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, SeedIdentificationError)
+    assert "OPENROUTER_API_KEY" in str(result.exception)
 
 
 @respx.mock

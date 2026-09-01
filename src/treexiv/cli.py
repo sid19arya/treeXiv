@@ -1,21 +1,23 @@
 """Command-line interface for the treexiv MVP pipeline.
 
 Each subcommand is one PRD step, callable in isolation and piping JSON to the
-next: `search-seed` -> (caller resolves ambiguity) -> `expand` -> `filter` ->
-`render`. `run` chains expand/filter/render for a seed ID that's already
-resolved.
+next: `identify-seed` (optional Step 0) -> `search-seed` -> (caller resolves
+ambiguity) -> `expand` -> `filter` -> `render`. `run` chains
+expand/filter/render for a seed ID that's already resolved.
 
 This CLI is designed to be driven by an agent (see
-`.claude/skills/treexiv-lineage/SKILL.md`) rather than a human typing
-commands directly: `search-seed` deliberately does *not* try to resolve
-ambiguity itself (e.g. via a web-search cross-check) — Step 1 of the PRD asks
-for exactly that kind of judgment call, which belongs to whatever LLM/agent
-is orchestrating the run, not to this package. See README.md and CLAUDE.md
-for the harness-integration note.
+`.claude/skills/treexiv-lineage/SKILL.md`) but is usable standalone.
+`search-seed` deliberately does *not* try to resolve ambiguity itself (that
+judgment call belongs to the orchestrating agent). `identify-seed` is the one
+step that reaches for an LLM: it turns a vague description into a title worth
+searching by calling a web-search-grounded OpenRouter model, since plain
+OpenAlex title search can't bridge that gap. It's still only a lead —
+`search-seed` and the usual disambiguation run after it.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -30,6 +32,7 @@ from treexiv.filtering import filter_by_idea
 from treexiv.models import ExpansionResult, FilteredGraph
 from treexiv.openalex import OpenAlexClient
 from treexiv.render import render_html
+from treexiv.seed_llm import identify_seed
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -46,16 +49,12 @@ def _settings_from_options(
     cache_dir: str | None,
 ) -> Settings:
     base = Settings.from_env()
-    return Settings(
-        base_url=base.base_url,
-        mailto=base.mailto,
-        api_key=base.api_key,
+    return dataclasses.replace(
+        base,
         total_corpus_cap=total_cap if total_cap is not None else base.total_corpus_cap,
         per_node_fanout_cap=fanout_cap if fanout_cap is not None else base.per_node_fanout_cap,
         sampling_strategy=sampling if sampling is not None else base.sampling_strategy,  # type: ignore[arg-type]
         bm25_top_k=top_k if top_k is not None else base.bm25_top_k,
-        timeout_seconds=base.timeout_seconds,
-        max_retries=base.max_retries,
         cache_dir=cache_dir if cache_dir is not None else base.cache_dir,
     )
 
@@ -64,6 +63,34 @@ def _settings_from_options(
 @click.version_option(package_name="treexiv")
 def main() -> None:
     """treexiv: trace a paper's citation lineage as an interactive HTML graph."""
+
+
+@main.command("identify-seed")
+@click.argument("description")
+@click.option(
+    "--model",
+    default=None,
+    help="OpenRouter model slug (overrides OPENROUTER_MODEL for this call).",
+)
+@click.option(
+    "--web/--no-web",
+    "web_search",
+    default=None,
+    help="Toggle web-search grounding (default: on, or TREEXIV_LLM_WEB_SEARCH).",
+)
+def identify_seed_cmd(description: str, model: str | None, web_search: bool | None) -> None:
+    """Guess which paper DESCRIPTION refers to, via a web-searching LLM (Step 0).
+
+    Prints a JSON object with a best-guess title / arXiv ID / DOI and a
+    `search_query` string to feed straight into `search-seed`. This is a
+    *lead*, not a resolution — run `search-seed` and confirm the match before
+    `run`. Requires OPENROUTER_API_KEY (see .env.example).
+    """
+    settings = Settings.from_env()
+    if model:
+        settings = dataclasses.replace(settings, openrouter_model=model)
+    guess = identify_seed(description, settings, web_search=web_search)
+    click.echo(json.dumps(guess.to_dict(), indent=2))
 
 
 @main.command("search-seed")

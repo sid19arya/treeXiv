@@ -27,6 +27,31 @@ def test_from_env_reads_overrides(monkeypatch) -> None:
     assert settings.sampling_strategy == "random"
 
 
+def test_from_env_reads_openrouter_settings(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-abc")
+    monkeypatch.setenv("OPENROUTER_MODEL", "z-ai/glm-5.3-flash")
+    monkeypatch.setenv("TREEXIV_LLM_WEB_SEARCH", "false")
+
+    settings = Settings.from_env()
+
+    assert settings.openrouter_api_key == "sk-or-abc"
+    assert settings.openrouter_model == "z-ai/glm-5.3-flash"
+    assert settings.llm_web_search is False
+    assert settings.openrouter_base_url == "https://openrouter.ai/api/v1"
+
+
+def test_openrouter_model_defaults_when_unset(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    monkeypatch.setenv("OPENROUTER_MODEL", "")
+    monkeypatch.delenv("TREEXIV_LLM_WEB_SEARCH", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.openrouter_api_key is None
+    assert settings.openrouter_model == "z-ai/glm-5.3-flash"
+    assert settings.llm_web_search is True
+
+
 def test_from_env_defaults_when_unset(monkeypatch) -> None:
     # Set (not delete) each var to "": `Settings.from_env()` calls
     # `load_dotenv()`, which would otherwise repopulate these from the
