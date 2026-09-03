@@ -49,6 +49,7 @@ def _settings_from_options(
     cache_dir: str | None = None,
     curation: str | None = None,
     max_nodes: int | None = None,
+    narrative: bool | None = None,
 ) -> Settings:
     base = Settings.from_env()
     return dataclasses.replace(
@@ -60,6 +61,7 @@ def _settings_from_options(
         cache_dir=cache_dir if cache_dir is not None else base.cache_dir,
         curation_mode=curation if curation is not None else base.curation_mode,  # type: ignore[arg-type]
         curation_max_nodes=max_nodes if max_nodes is not None else base.curation_max_nodes,
+        narrative=narrative if narrative is not None else base.narrative,
     )
 
 
@@ -71,7 +73,8 @@ def _describe_graph(graph: FilteredGraph) -> str:
     """One-line summary of what filtering produced, for stderr."""
     how = "LLM-curated" if graph.curation == "llm" else "BM25 top-K"
     clusters = f", {len(graph.clusters)} concept clusters" if graph.clusters else ""
-    return f"{how}: {len(graph.nodes)} nodes, {len(graph.edges)} edges{clusters}"
+    story = f", narrative in {len(graph.narrative.beats)} beats" if graph.narrative else ""
+    return f"{how}: {len(graph.nodes)} nodes, {len(graph.edges)} edges{clusters}{story}"
 
 
 _CURATION_OPTION = click.option(
@@ -89,6 +92,14 @@ _MAX_NODES_OPTION = click.option(
     type=int,
     default=None,
     help="Cap on papers LLM curation may keep (default 35). Ignored by --curation bm25.",
+)
+_NARRATIVE_OPTION = click.option(
+    "--narrative/--no-narrative",
+    default=None,
+    help=(
+        "Write the lineage story for the curated graph (default: on). "
+        "One extra LLM call; only applies when curation ran."
+    ),
 )
 
 
@@ -203,6 +214,7 @@ def expand_cmd(
 @click.option("--top-k", type=int, default=None, help="BM25 nodes to keep (default 40).")
 @_CURATION_OPTION
 @_MAX_NODES_OPTION
+@_NARRATIVE_OPTION
 @click.option("--out", "out_path", required=True, type=click.Path(path_type=Path))
 def filter_cmd(
     expansion_json: Path,
@@ -210,15 +222,18 @@ def filter_cmd(
     top_k: int | None,
     curation: str | None,
     max_nodes: int | None,
+    narrative: bool | None,
     out_path: Path,
 ) -> None:
     """Filter an expansion (from `expand`) down to the papers worth showing.
 
-    By default an LLM curates the set and groups it into concept clusters;
-    `--curation bm25` keeps the older deterministic top-K behaviour. Writes the
-    filtered node/edge set as JSON to --out.
+    By default an LLM curates the set, groups it into concept clusters, and
+    writes the lineage story; `--curation bm25` keeps the older deterministic
+    top-K behaviour. Writes the filtered node/edge set as JSON to --out.
     """
-    settings = _settings_from_options(top_k=top_k, curation=curation, max_nodes=max_nodes)
+    settings = _settings_from_options(
+        top_k=top_k, curation=curation, max_nodes=max_nodes, narrative=narrative
+    )
     expansion = ExpansionResult.from_dict(json.loads(expansion_json.read_text(encoding="utf-8")))
     filtered = build_graph(expansion, idea, settings, on_warning=_warn)
     _write_json(out_path, filtered.to_dict())
@@ -246,6 +261,7 @@ def render_cmd(filtered_json: Path, out_path: Path, title: str) -> None:
 @click.option("--top-k", type=int, default=None)
 @_CURATION_OPTION
 @_MAX_NODES_OPTION
+@_NARRATIVE_OPTION
 @click.option("--cache-dir", default=None)
 @click.option(
     "--out-json", required=True, type=click.Path(path_type=Path), help="Filtered graph JSON output."
@@ -275,6 +291,7 @@ def run_cmd(
     top_k: int | None,
     curation: str | None,
     max_nodes: int | None,
+    narrative: bool | None,
     cache_dir: str | None,
     out_json: Path,
     out_expansion: Path | None,
@@ -288,7 +305,7 @@ def run_cmd(
     judgment.
     """
     settings = _settings_from_options(
-        total_cap, fanout_cap, sampling, top_k, cache_dir, curation, max_nodes
+        total_cap, fanout_cap, sampling, top_k, cache_dir, curation, max_nodes, narrative
     )
     with OpenAlexClient(settings) as client:
         seed_work = client.get_work(work_id)

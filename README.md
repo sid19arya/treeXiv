@@ -81,9 +81,10 @@ uv run treexiv identify-seed "the 2017 paper that introduced the transformer" \
 command only talks to OpenAlex. Web-search grounding is on by default
 (`--no-web` to disable, or `--model` to override `OPENROUTER_MODEL`).
 
-Curation runs automatically when `OPENROUTER_API_KEY` is set. To pin the
-behaviour explicitly, pass `--curation llm|bm25|auto` (and `--max-nodes N` to
-change how many papers curation may keep) to `run` or `filter`.
+Curation and the lineage story run automatically when `OPENROUTER_API_KEY` is
+set. To pin the behaviour explicitly, pass `--curation llm|bm25|auto` (plus
+`--max-nodes N` for how many papers curation may keep, or `--no-narrative` to
+skip the story) to `run` or `filter`.
 
 Run `uv run treexiv --help` for the full command list (`identify-seed`,
 `search-seed`, `expand`, `filter`, `render`, `run`).
@@ -141,15 +142,22 @@ the session. Free-tier services spin down after 15 minutes idle and take
    Your seed paper is always kept. Without `OPENROUTER_API_KEY` — or with
    `--curation bm25` — this falls back to the older behaviour: keep the top-K
    papers by BM25 score and nothing else.
-4. **Render** — the result becomes a single self-contained HTML file: no
+4. **Narrate** — a second, much smaller LLM call writes the story those
+   papers tell: a headline, a few paragraphs on where the idea came from and
+   what it grew into, and the three-to-six turns in that story with the papers
+   that mark each one. It never asserts how two papers cite each other — that
+   text is read off the actual citation edges, not written.
+5. **Render** — the result becomes a single self-contained HTML file: no
    server, nothing to host, just open it.
 
 ## What you get
 
-- **A sidebar** with the seed paper's details by default; click any node to
-  see its title, authors, abstract, and a plain-English description of how
-  it connects back to the seed (direct citation, or a two-hop path through
-  an intermediate paper).
+- **The lineage story in the sidebar** — headline, overview, and the beats of
+  how the idea developed. Click a beat to highlight the papers that mark it.
+  Click any paper to swap the sidebar to its details: title, authors,
+  abstract, why curation kept it, and how it connects back to the seed (direct
+  citation, or a two-hop path through an intermediate paper). Runs without an
+  LLM key fall back to showing the seed paper there, as before.
 - **A timeline layout** — older papers sit toward the top-left, newer papers
   toward the bottom-right, with the seed paper pinned at the center, so
   position alone tells you roughly when something happened relative to your
@@ -177,7 +185,8 @@ handful of requests:
 | `TREEXIV_CURATION` | `auto` (default: curate when a key exists, else BM25), `llm` (require curation), or `bm25` (never call an LLM) |
 | `TREEXIV_CURATION_MAX_NODES` | Cap on papers curation may keep (default 35) |
 | `TREEXIV_CURATION_PREFILTER` | How many BM25-ranked papers curation reads (default 120) |
-| `TREEXIV_CURATION_MODEL` | Model slug for curation only, if it should differ from `OPENROUTER_MODEL` |
+| `TREEXIV_CURATION_MODEL` | Model slug for the curation and narrative calls only, if they should differ from `OPENROUTER_MODEL` |
+| `TREEXIV_NARRATIVE` | `true` (default) writes the lineage story; `false` skips that second call |
 | `TREEXIV_LLM_WEB_SEARCH` | `true` (default) grounds Step 0 in a web search; `false` disables it |
 | `TREEXIV_TOTAL_CORPUS_CAP` | Global cap on papers collected (default 500) |
 | `TREEXIV_FANOUT_CAP` | Per-paper cap on references/citations followed (default 100) |
@@ -196,8 +205,14 @@ place, and citation coverage varies by field and publisher. What BM25 no
 longer does is decide what you see: it hands a shortlist to an LLM, which
 judges lineage rather than word overlap. That's where the graph goes from
 "forty papers that mention your keywords" to "the dozen or so that tell the
-story." Every LLM step degrades to a deterministic fallback if the key is
-missing or the call fails, so a run never depends on it.
+story."
+
+The division of labour between written and derived text is deliberate. The
+model chooses papers and writes prose; it is never asked what cites what.
+Citation relationships come off the traversed edges, so a confidently-worded
+but invented "X built directly on Y" can't reach the sidebar. Every LLM step
+degrades to a deterministic fallback if the key is missing or the call fails,
+so a run never depends on one.
 
 ## License
 

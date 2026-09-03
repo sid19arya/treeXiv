@@ -40,6 +40,9 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 120.0
 DEFAULT_CURATION_MODE: CurationMode = "auto"
 DEFAULT_CURATION_PREFILTER = 120
 DEFAULT_CURATION_MAX_NODES = 35
+# Step 4b (`synthesis.py`): a second, much smaller call that writes the lineage
+# story for an already-curated graph. Only runs when curation itself ran.
+DEFAULT_NARRATIVE = True
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -93,6 +96,7 @@ class Settings:
     curation_prefilter: int = DEFAULT_CURATION_PREFILTER
     curation_max_nodes: int = DEFAULT_CURATION_MAX_NODES
     curation_model: str | None = None
+    narrative: bool = DEFAULT_NARRATIVE
 
     @property
     def resolved_curation_model(self) -> str:
@@ -109,7 +113,7 @@ class Settings:
         TREEXIV_BM25_TOP_K, TREEXIV_CACHE_DIR, OPENROUTER_API_KEY,
         OPENROUTER_BASE_URL, OPENROUTER_MODEL, TREEXIV_LLM_WEB_SEARCH,
         TREEXIV_CURATION, TREEXIV_CURATION_PREFILTER, TREEXIV_CURATION_MAX_NODES,
-        TREEXIV_CURATION_MODEL.
+        TREEXIV_CURATION_MODEL, TREEXIV_NARRATIVE.
         """
         load_dotenv()
         return cls(
@@ -138,4 +142,5 @@ class Settings:
                 "TREEXIV_CURATION_MAX_NODES", DEFAULT_CURATION_MAX_NODES
             ),
             curation_model=os.getenv("TREEXIV_CURATION_MODEL") or None,
+            narrative=_env_bool("TREEXIV_NARRATIVE", DEFAULT_NARRATIVE),
         )
