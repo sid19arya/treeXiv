@@ -153,7 +153,9 @@ the session. Free-tier services spin down after 15 minutes idle and take
    that mark each one. It never asserts how two papers cite each other — that
    text is read off the actual citation edges, not written.
 5. **Render** — the result becomes a single self-contained HTML file: no
-   server, nothing to host, just open it.
+   server, nothing to host, just open it. It opens on the concept clusters
+   rather than the papers — a handful of named strands — and you expand the
+   ones you care about.
 
 ## What you get
 
@@ -163,10 +165,16 @@ the session. Free-tier services spin down after 15 minutes idle and take
   abstract, why curation kept it, and how it connects back to the seed (direct
   citation, or a two-hop path through an intermediate paper). Runs without an
   LLM key fall back to showing the seed paper there, as before.
-- **A timeline layout** — older papers sit toward the top-left, newer papers
-  toward the bottom-right, with the seed paper pinned at the center, so
-  position alone tells you roughly when something happened relative to your
-  seed.
+- **A graph that starts readable.** A curated run opens showing one circle
+  per concept strand — "Cascade & deferral precursors, 3 papers, 2022–2023" —
+  not thirty-odd unlabelled dots. Click a strand to expand it into its papers
+  in place; close it from its panel. Citations between two closed strands are
+  drawn once, thickened and numbered, instead of as a hairball.
+- **A timeline layout** — older strands (and, inside them, older papers) sit
+  toward the top-left, newer toward the bottom-right, with the seed paper
+  pinned at the center, so position alone tells you roughly when something
+  happened relative to your seed. Nothing moves when you expand a strand:
+  every position is computed up front, so the layout keeps its meaning.
 - **Directional arrows** that read as "led to": an arrow from A to B means A
   came first and B builds on it (i.e. B cites A) — not just "a citation
   exists."
