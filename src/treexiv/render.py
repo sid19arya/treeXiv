@@ -18,7 +18,7 @@ from importlib import resources
 from pathlib import Path
 
 from treexiv.layout import Position, compute_positions
-from treexiv.models import FilteredGraph, Node
+from treexiv.models import Cluster, FilteredGraph, LineageNarrative, Node, ScoredNode
 from treexiv.narrative import describe_relationship
 
 _HOP_COLORS = {0: "#f2a900", 1: "#2a9d8f", 2: "#8ecae6"}
@@ -53,8 +53,9 @@ def _escape_for_inline_script(payload: str) -> str:
 
 
 def _node_payload(
-    node: Node, score: float, is_seed: bool, relationship: str, position: Position
+    scored: ScoredNode, is_seed: bool, relationship: str, position: Position
 ) -> dict:
+    node, score = scored.node, scored.score
     return {
         "id": node.id,
         "label": _short_label(node),
@@ -69,6 +70,9 @@ def _node_payload(
         "score": score,
         "is_seed": is_seed,
         "relationship": relationship,
+        "why": scored.why,
+        "cluster_id": scored.cluster_id,
+        "importance": scored.importance,
         "x": position.x,
         "y": position.y,
         "color": {
@@ -78,6 +82,27 @@ def _node_payload(
         "size": 14 + min(node.cited_by_count, 5000) ** 0.5,
         "borderWidth": 3 if is_seed else 1.5,
         "font": {"size": 13 if is_seed else 11},
+    }
+
+
+def _narrative_payload(
+    narrative: LineageNarrative | None, clusters: list[Cluster]
+) -> dict | None:
+    """The written lineage story, or None when a run produced no prose.
+
+    Clusters ride along here rather than on each node: the story panel lists
+    them, and every node already carries its `cluster_id`.
+    """
+    if narrative is None and not clusters:
+        return None
+    return {
+        "headline": narrative.headline if narrative else "",
+        "overview": narrative.overview if narrative else "",
+        "beats": [
+            {"title": b.title, "text": b.text, "node_ids": b.node_ids}
+            for b in (narrative.beats if narrative else [])
+        ],
+        "clusters": [c.to_dict() for c in clusters],
     }
 
 
@@ -105,8 +130,7 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
 
     node_payloads = [
         _node_payload(
-            sn.node,
-            sn.score,
+            sn,
             sn.node.id == graph.seed_id,
             describe_relationship(sn.node.id, graph.seed_id, nodes_by_id, graph.edges),
             positions[sn.node.id],
@@ -149,6 +173,10 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
         _escape_for_inline_script(
             json.dumps([{"color": _HOP_COLORS[h], "label": _HOP_LABELS[h]} for h in (0, 1, 2)])
         ),
+    )
+    html = html.replace(
+        "__NARRATIVE_JSON__",
+        _escape_for_inline_script(json.dumps(_narrative_payload(graph.narrative, graph.clusters))),
     )
     html = html.replace("__VIS_NETWORK_JS__", _load_asset("vis-network.min.js"))
     html = html.replace("__VIS_NETWORK_CSS__", _load_asset("vis-network.css"))
@@ -197,6 +225,26 @@ _TEMPLATE = r"""<!doctype html>
   #sidebar a.doi:hover { text-decoration: underline; }
   #back-to-seed { display: none; font-size: 12px; color: #1d4ed8; background: none;
     border: none; cursor: pointer; padding: 0 0 14px; text-decoration: underline; }
+  #sidebar .why { margin: 14px 0; padding: 12px 14px; background: #fffbeb;
+    border-left: 3px solid var(--accent); border-radius: 4px; font-size: 13px;
+    line-height: 1.5; }
+  #sidebar .why b { display: block; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #92700a; margin-bottom: 4px; }
+
+  #story .headline { font-size: 16px; line-height: 1.4; font-weight: 600; margin: 0 0 12px; }
+  #story .overview p { font-size: 13px; line-height: 1.65; color: #1e293b; margin: 0 0 10px; }
+  #story .beat { width: 100%; text-align: left; display: block; background: #f8fafc;
+    border: 1px solid var(--border); border-left: 3px solid #94a3b8; border-radius: 4px;
+    padding: 10px 12px; margin-bottom: 8px; cursor: pointer; font: inherit; color: inherit; }
+  #story .beat:hover { background: #f1f5f9; border-left-color: var(--accent); }
+  #story .beat.active { background: #fff7e6; border-left-color: var(--accent); }
+  #story .beat .beat-title { font-size: 12px; font-weight: 700; margin-bottom: 3px; }
+  #story .beat .beat-text { font-size: 12px; line-height: 1.5; color: #475569; }
+  #story .beat .beat-count { font-size: 11px; color: var(--muted); margin-top: 5px; }
+  #story .cluster-row { display: flex; align-items: baseline; gap: 6px; font-size: 12px;
+    line-height: 1.5; margin: 4px 0; }
+  #story .cluster-row .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); flex: none; padding-top: 2px; }
 
   #graph-pane { flex: 1; position: relative; min-width: 0; }
   #topbar { position: absolute; top: 0; left: 0; right: 0; z-index: 5; padding: 14px 18px;
@@ -217,16 +265,28 @@ _TEMPLATE = r"""<!doctype html>
 <body>
 <div id="app">
   <div id="sidebar">
-    <span class="badge" id="panel-badge">Seed paper</span>
-    <button id="back-to-seed">&larr; Back to seed paper</button>
-    <h1 id="panel-title"></h1>
-    <div class="meta" id="panel-authors"></div>
-    <div class="meta" id="panel-venue"></div>
-    <div class="meta" id="panel-score"></div>
-    <a class="doi" id="panel-doi" href="#" target="_blank" rel="noopener"></a>
-    <div class="relationship" id="panel-relationship" style="display:none;"></div>
-    <div class="section-label">Abstract</div>
-    <div class="abstract" id="panel-abstract"></div>
+    <div id="story" style="display:none;">
+      <span class="badge">The story</span>
+      <div class="headline" id="story-headline"></div>
+      <div class="overview" id="story-overview"></div>
+      <div class="section-label" id="story-beats-label" style="display:none;">How it unfolded</div>
+      <div id="story-beats"></div>
+      <div class="section-label" id="story-clusters-label" style="display:none;">Strands</div>
+      <div id="story-clusters"></div>
+    </div>
+    <div id="paper">
+      <span class="badge" id="panel-badge">Seed paper</span>
+      <button id="back-to-seed">&larr; Back to seed paper</button>
+      <h1 id="panel-title"></h1>
+      <div class="meta" id="panel-authors"></div>
+      <div class="meta" id="panel-venue"></div>
+      <div class="meta" id="panel-score"></div>
+      <a class="doi" id="panel-doi" href="#" target="_blank" rel="noopener"></a>
+      <div class="why" id="panel-why" style="display:none;"></div>
+      <div class="relationship" id="panel-relationship" style="display:none;"></div>
+      <div class="section-label">Abstract</div>
+      <div class="abstract" id="panel-abstract"></div>
+    </div>
   </div>
   <div id="graph-pane">
     <div id="topbar">
@@ -249,6 +309,8 @@ _TEMPLATE = r"""<!doctype html>
   var STATS_TEXT = __STATS_TEXT__;
   var HOP_LEGEND = __HOP_LEGEND_JSON__;
   var PAGE_TITLE = __PAGE_TITLE__;
+  var NARRATIVE = __NARRATIVE_JSON__;
+  var HAS_STORY = !!(NARRATIVE && (NARRATIVE.overview || (NARRATIVE.clusters || []).length));
 
   document.title = PAGE_TITLE;
   document.getElementById("topbar-title").textContent = "Lineage for: " + SEED_LABEL;
@@ -313,9 +375,93 @@ _TEMPLATE = r"""<!doctype html>
     return authors.slice(0, 4).join(", ") + ", et al.";
   }
 
+  var storyEl = document.getElementById("story");
+  var paperEl = document.getElementById("paper");
+
+  function buildStory() {
+    if (!HAS_STORY) return;
+    document.getElementById("story-headline").textContent = NARRATIVE.headline || "";
+    var overviewEl = document.getElementById("story-overview");
+    (NARRATIVE.overview || "").split(/\n\s*\n/).forEach(function (para) {
+      if (!para.trim()) return;
+      var p = document.createElement("p");
+      p.textContent = para.trim();
+      overviewEl.appendChild(p);
+    });
+
+    var beats = NARRATIVE.beats || [];
+    var beatsEl = document.getElementById("story-beats");
+    if (beats.length) {
+      document.getElementById("story-beats-label").style.display = "block";
+    }
+    beats.forEach(function (beat) {
+      var btn = document.createElement("button");
+      btn.className = "beat";
+      btn.type = "button";
+      if (beat.title) {
+        var t = document.createElement("div");
+        t.className = "beat-title";
+        t.textContent = beat.title;
+        btn.appendChild(t);
+      }
+      var body = document.createElement("div");
+      body.className = "beat-text";
+      body.textContent = beat.text;
+      btn.appendChild(body);
+      var ids = (beat.node_ids || []).filter(function (id) { return !!nodesById[id]; });
+      if (ids.length) {
+        var count = document.createElement("div");
+        count.className = "beat-count";
+        count.textContent = "Highlights " + ids.length + (ids.length === 1 ? " paper" : " papers");
+        btn.appendChild(count);
+      }
+      btn.addEventListener("click", function () {
+        Array.prototype.forEach.call(beatsEl.children, function (el) {
+          el.classList.remove("active");
+        });
+        btn.classList.add("active");
+        if (!ids.length) return;
+        network.selectNodes(ids);
+        network.fit({ nodes: ids, animation: { duration: 400 } });
+      });
+      beatsEl.appendChild(btn);
+    });
+
+    var clusters = NARRATIVE.clusters || [];
+    if (clusters.length) {
+      document.getElementById("story-clusters-label").style.display = "block";
+      var clustersEl = document.getElementById("story-clusters");
+      clusters.forEach(function (cluster) {
+        var row = document.createElement("div");
+        row.className = "cluster-row";
+        var role = document.createElement("span");
+        role.className = "role";
+        role.textContent = cluster.role;
+        var body = document.createElement("span");
+        var name = document.createElement("b");
+        name.textContent = cluster.name + ". ";
+        body.appendChild(name);
+        body.appendChild(document.createTextNode(cluster.summary || ""));
+        row.appendChild(role);
+        row.appendChild(body);
+        clustersEl.appendChild(row);
+      });
+    }
+  }
+
+  function showStory() {
+    // The story is the resting state when there is one; without it the seed
+    // paper keeps that role, exactly as before narratives existed.
+    if (!HAS_STORY) { showNode(SEED_ID); return; }
+    storyEl.style.display = "block";
+    paperEl.style.display = "none";
+  }
+
   function showNode(id) {
     var n = nodesById[id];
     if (!n) return;
+    storyEl.style.display = "none";
+    paperEl.style.display = "block";
     var isSeed = id === SEED_ID;
     document.getElementById("panel-badge").textContent = isSeed
       ? "Seed paper" : "Hop " + n.hop + (n.hop === 1 ? " — direct neighbor" : " — indirect");
@@ -333,6 +479,17 @@ _TEMPLATE = r"""<!doctype html>
     } else {
       doiEl.style.display = "none";
     }
+    var whyEl = document.getElementById("panel-why");
+    if (n.why) {
+      whyEl.innerHTML = "";
+      var label = document.createElement("b");
+      label.textContent = "Why this paper is here";
+      whyEl.appendChild(label);
+      whyEl.appendChild(document.createTextNode(n.why));
+      whyEl.style.display = "block";
+    } else {
+      whyEl.style.display = "none";
+    }
     var relEl = document.getElementById("panel-relationship");
     if (isSeed) {
       relEl.style.display = "none";
@@ -341,12 +498,14 @@ _TEMPLATE = r"""<!doctype html>
       relEl.style.display = "block";
     }
     document.getElementById("panel-abstract").textContent = n.abstract;
-    document.getElementById("back-to-seed").style.display = isSeed ? "none" : "block";
+    var back = document.getElementById("back-to-seed");
+    back.textContent = HAS_STORY ? "← Back to the story" : "← Back to seed paper";
+    back.style.display = (HAS_STORY || !isSeed) ? "block" : "none";
   }
 
   document.getElementById("back-to-seed").addEventListener("click", function () {
     network.unselectAll();
-    showNode(SEED_ID);
+    showStory();
   });
 
   network.on("click", function (params) {
@@ -354,11 +513,12 @@ _TEMPLATE = r"""<!doctype html>
       showNode(params.nodes[0]);
     } else {
       network.unselectAll();
-      showNode(SEED_ID);
+      showStory();
     }
   });
 
-  showNode(SEED_ID);
+  buildStory();
+  showStory();
 })();
 </script>
 </body>

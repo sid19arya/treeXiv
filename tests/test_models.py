@@ -4,6 +4,8 @@ from treexiv.models import (
     Edge,
     ExpansionResult,
     FilteredGraph,
+    LineageNarrative,
+    NarrativeBeat,
     Node,
     ScoredNode,
     Work,
@@ -174,3 +176,31 @@ def test_filtered_graph_reads_pre_curation_json() -> None:
     assert graph.curation == "bm25"
     assert graph.clusters == []
     assert graph.nodes[0].cluster_id is None
+
+
+def test_filtered_graph_round_trips_its_narrative() -> None:
+    graph = FilteredGraph(
+        seed_id="SEED",
+        idea_text="idea",
+        top_k=0,
+        nodes=[],
+        edges=[],
+        curation="llm",
+        narrative=LineageNarrative(
+            headline="A headline.",
+            overview="One.\n\nTwo.",
+            beats=[NarrativeBeat(title="Beat", text="Text.", node_ids=["W1"])],
+            model="z-ai/glm-5.3-flash",
+        ),
+    )
+    restored = FilteredGraph.from_dict(graph.to_dict())
+    assert restored.narrative is not None
+    assert restored.narrative.headline == "A headline."
+    assert restored.narrative.beats[0].node_ids == ["W1"]
+    assert restored.narrative.model == "z-ai/glm-5.3-flash"
+
+
+def test_filtered_graph_without_a_narrative_round_trips_as_none() -> None:
+    graph = FilteredGraph(seed_id="SEED", idea_text="idea", top_k=0, nodes=[], edges=[])
+    assert graph.to_dict()["narrative"] is None
+    assert FilteredGraph.from_dict(graph.to_dict()).narrative is None

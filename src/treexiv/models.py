@@ -201,6 +201,57 @@ class Cluster:
         )
 
 
+@dataclass(slots=True, frozen=True)
+class NarrativeBeat:
+    """One turn in the lineage story, and the papers that mark it."""
+
+    title: str
+    text: str
+    node_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"title": self.title, "text": self.text, "node_ids": list(self.node_ids)}
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> NarrativeBeat:
+        return cls(
+            title=payload.get("title", ""),
+            text=payload.get("text", ""),
+            node_ids=list(payload.get("node_ids", [])),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class LineageNarrative:
+    """The written story for a curated graph (`synthesis.py`).
+
+    Absent on BM25 runs and on curated runs where synthesis failed — the graph
+    renders fine without it, just without the prose.
+    """
+
+    headline: str
+    overview: str
+    beats: list[NarrativeBeat] = field(default_factory=list)
+    model: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "headline": self.headline,
+            "overview": self.overview,
+            "beats": [b.to_dict() for b in self.beats],
+            "model": self.model,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> LineageNarrative:
+        return cls(
+            headline=payload.get("headline", ""),
+            overview=payload.get("overview", ""),
+            beats=[NarrativeBeat.from_dict(b) for b in payload.get("beats", [])],
+            model=payload.get("model", ""),
+        )
+
+
 # Keys `ScoredNode.to_dict` adds on top of the plain `Node` payload, so
 # `from_dict` knows which ones not to hand to `Node.from_dict`.
 _SCORED_ONLY_KEYS = frozenset({"bm25_score", "cluster_id", "importance", "why"})
@@ -250,7 +301,9 @@ class FilteredGraph:
     Two paths produce this shape. `curation="bm25"` is the deterministic
     top-K-by-BM25 filter (`filtering.py`), which leaves `clusters` empty.
     `curation="llm"` is the LLM curation pass (`curate.py`), which picks
-    fewer, more deliberate papers and groups them into `clusters`.
+    fewer, more deliberate papers, groups them into `clusters`, and usually
+    carries a written `narrative` (`synthesis.py`) explaining what they add
+    up to.
     """
 
     seed_id: str
@@ -261,6 +314,7 @@ class FilteredGraph:
     clusters: list[Cluster] = field(default_factory=list)
     curation: str = "bm25"
     curation_notes: str = ""
+    narrative: LineageNarrative | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -269,6 +323,7 @@ class FilteredGraph:
             "top_k": self.top_k,
             "curation": self.curation,
             "curation_notes": self.curation_notes,
+            "narrative": self.narrative.to_dict() if self.narrative else None,
             "clusters": [c.to_dict() for c in self.clusters],
             "nodes": [n.to_dict() for n in self.nodes],
             "edges": [e.to_dict() for e in self.edges],
@@ -285,4 +340,9 @@ class FilteredGraph:
             clusters=[Cluster.from_dict(c) for c in payload.get("clusters", [])],
             curation=payload.get("curation", "bm25"),
             curation_notes=payload.get("curation_notes", ""),
+            narrative=(
+                LineageNarrative.from_dict(payload["narrative"])
+                if payload.get("narrative")
+                else None
+            ),
         )

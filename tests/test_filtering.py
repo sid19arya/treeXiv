@@ -127,18 +127,78 @@ def test_build_graph_auto_falls_back_to_bm25_without_a_key(settings, two_node_ex
     assert "OPENROUTER_API_KEY" in warnings[0]
 
 
+_NARRATIVE_REPLY = {
+    "choices": [
+        {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "headline": "A short lineage.",
+                        "overview": "What came before.\n\nWhat came after.",
+                        "beats": [{"title": "The turn", "text": "It changed here.", "papers": [1]}],
+                    }
+                )
+            }
+        }
+    ]
+}
+
+
 @respx.mock
-def test_build_graph_auto_curates_when_a_key_is_available(settings, two_node_expansion) -> None:
+def test_build_graph_auto_curates_and_narrates_when_a_key_is_available(
+    settings, two_node_expansion
+) -> None:
     keyed = dataclasses.replace(settings, curation_mode="auto", openrouter_api_key="sk-or-test")
-    respx.post(_CHAT_URL).mock(return_value=httpx.Response(200, json=_CURATION_REPLY))
+    route = respx.post(_CHAT_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=_CURATION_REPLY),
+            httpx.Response(200, json=_NARRATIVE_REPLY),
+        ]
+    )
     graph = build_graph(two_node_expansion, "recursive language models", keyed)
+    assert route.call_count == 2  # curation, then synthesis
     assert graph.curation == "llm"
     assert [c.name for c in graph.clusters] == ["Foundations"]
+    assert graph.narrative is not None
+    assert graph.narrative.headline == "A short lineage."
+    assert graph.narrative.beats[0].node_ids == ["W1"]
+
+
+@respx.mock
+def test_build_graph_keeps_the_graph_when_synthesis_fails(settings, two_node_expansion) -> None:
+    """Prose is a bonus; losing it must not lose the curated papers."""
+    keyed = dataclasses.replace(settings, curation_mode="auto", openrouter_api_key="sk-or-test")
+    respx.post(_CHAT_URL).mock(
+        side_effect=[
+            httpx.Response(200, json=_CURATION_REPLY),
+            httpx.Response(200, json={"choices": [{"message": {"content": "sorry"}}]}),
+        ]
+    )
+    warnings: list[str] = []
+    graph = build_graph(
+        two_node_expansion, "recursive language models", keyed, on_warning=warnings.append
+    )
+    assert graph.curation == "llm"
+    assert graph.narrative is None
+    assert "synthesis failed" in warnings[0]
+
+
+@respx.mock
+def test_build_graph_skips_synthesis_when_switched_off(settings, two_node_expansion) -> None:
+    keyed = dataclasses.replace(
+        settings, curation_mode="auto", openrouter_api_key="sk-or-test", narrative=False
+    )
+    route = respx.post(_CHAT_URL).mock(return_value=httpx.Response(200, json=_CURATION_REPLY))
+    graph = build_graph(two_node_expansion, "recursive language models", keyed)
+    assert route.call_count == 1
+    assert graph.narrative is None
 
 
 @respx.mock
 def test_build_graph_auto_falls_back_when_curation_fails(settings, two_node_expansion) -> None:
-    keyed = dataclasses.replace(settings, curation_mode="auto", openrouter_api_key="sk-or-test")
+    keyed = dataclasses.replace(
+        settings, curation_mode="auto", openrouter_api_key="sk-or-test", narrative=False
+    )
     respx.post(_CHAT_URL).mock(return_value=httpx.Response(500))
     warnings: list[str] = []
     graph = build_graph(
@@ -150,7 +210,9 @@ def test_build_graph_auto_falls_back_when_curation_fails(settings, two_node_expa
 
 @respx.mock
 def test_build_graph_llm_mode_surfaces_the_failure(settings, two_node_expansion) -> None:
-    keyed = dataclasses.replace(settings, curation_mode="llm", openrouter_api_key="sk-or-test")
+    keyed = dataclasses.replace(
+        settings, curation_mode="llm", openrouter_api_key="sk-or-test", narrative=False
+    )
     respx.post(_CHAT_URL).mock(return_value=httpx.Response(500))
     with pytest.raises(CurationError):
         build_graph(two_node_expansion, "recursive language models", keyed)

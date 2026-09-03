@@ -33,5 +33,10 @@ class CurationError(LLMError):
     can't be parsed into a usable selection of papers."""
 
 
+class SynthesisError(LLMError):
+    """Raised when the Step 4b lineage-synthesis call fails or returns output
+    that can't be parsed into a usable narrative."""
+
+
 class GraphIOError(TreeXivError):
     """Raised when reading/writing expansion or filtered-graph JSON fails."""

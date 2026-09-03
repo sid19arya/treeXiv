@@ -1,7 +1,15 @@
 import json
 import re
 
-from treexiv.models import Cluster, Edge, FilteredGraph, Node, ScoredNode
+from treexiv.models import (
+    Cluster,
+    Edge,
+    FilteredGraph,
+    LineageNarrative,
+    NarrativeBeat,
+    Node,
+    ScoredNode,
+)
 from treexiv.render import render_html
 
 
@@ -185,3 +193,52 @@ def test_stats_line_names_the_curation_path(tmp_path) -> None:
     )
     html = render_html(bm25, tmp_path / "bm25.html").read_text(encoding="utf-8")
     assert "top-1 by keyword relevance" in html
+
+
+def _narrated_graph() -> FilteredGraph:
+    seed = _node("SEED", 0, title="Seed paper")
+    other = _node("W1", 1, title="Follow-up paper")
+    return FilteredGraph(
+        seed_id="SEED",
+        idea_text="an idea",
+        top_k=1,
+        nodes=[
+            ScoredNode(node=seed, score=0.0, why="The seed paper."),
+            ScoredNode(node=other, score=1.0, cluster_id="c1", importance=4,
+                       why="Scaled the idea up."),
+        ],
+        edges=[Edge("W1", "SEED")],
+        clusters=[Cluster(id="c1", name="Follow-ups", summary="What grew out of it.",
+                          role="descendant")],
+        curation="llm",
+        narrative=LineageNarrative(
+            headline="A short lineage.",
+            overview="First paragraph.\n\nSecond paragraph.",
+            beats=[NarrativeBeat(title="The turn", text="It changed here.", node_ids=["W1"])],
+        ),
+    )
+
+
+def test_render_embeds_the_lineage_story(tmp_path) -> None:
+    html = render_html(_narrated_graph(), tmp_path / "tree.html").read_text(encoding="utf-8")
+    narrative = _extract_json(html, "NARRATIVE")
+    assert narrative["headline"] == "A short lineage."
+    assert "Second paragraph." in narrative["overview"]
+    assert narrative["beats"][0]["node_ids"] == ["W1"]
+    assert narrative["clusters"][0]["name"] == "Follow-ups"
+
+
+def test_render_carries_per_paper_reasons(tmp_path) -> None:
+    html = render_html(_narrated_graph(), tmp_path / "tree.html").read_text(encoding="utf-8")
+    nodes = _extract_json(html, "NODES")
+    by_id = {n["id"]: n for n in nodes}
+    assert by_id["W1"]["why"] == "Scaled the idea up."
+    assert by_id["W1"]["cluster_id"] == "c1"
+    assert by_id["W1"]["importance"] == 4
+
+
+def test_render_without_a_narrative_has_no_story(tmp_path) -> None:
+    """The BM25 path still renders; the sidebar just falls back to the seed."""
+    graph = _graph([_node("SEED", 0), _node("W1", 1)], [Edge("SEED", "W1")])
+    html = render_html(graph, tmp_path / "tree.html").read_text(encoding="utf-8")
+    assert _extract_json(html, "NARRATIVE") is None
