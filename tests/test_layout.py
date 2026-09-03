@@ -1,4 +1,9 @@
-from treexiv.layout import Position, compute_positions
+from treexiv.layout import (
+    MEMBER_SPACING,
+    Position,
+    compute_cluster_layout,
+    compute_positions,
+)
 from treexiv.models import Node
 
 
@@ -90,3 +95,50 @@ def test_positions_are_deterministic_across_calls() -> None:
     first = compute_positions(nodes, "SEED")
     second = compute_positions(nodes, "SEED")
     assert first == second
+
+
+def test_cluster_layout_orders_clusters_oldest_to_newest() -> None:
+    """The top-level view keeps the diagonal's meaning: earlier strands sit
+    toward the top-left."""
+    old = [_node("a", 2010), _node("b", 2012)]
+    new = [_node("c", 2022), _node("d", 2024)]
+    layouts = compute_cluster_layout({"old": old, "new": new}, seed_year=2018)
+    assert layouts["old"].center.x < layouts["new"].center.x
+
+
+def test_cluster_layout_places_every_member() -> None:
+    members = [_node(str(i), 2015 + i) for i in range(7)]
+    layouts = compute_cluster_layout({"c": members}, seed_year=2018)
+    placed = layouts["c"].members
+    assert set(placed) == {n.id for n in members}
+    # Members are spread out, not stacked on one point.
+    assert len({(p.x, p.y) for p in placed.values()}) == len(members)
+
+
+def test_cluster_members_stay_near_their_center() -> None:
+    members = [_node(str(i), 2015) for i in range(9)]
+    layouts = compute_cluster_layout({"c": members}, seed_year=2015)
+    center = layouts["c"].center
+    for position in layouts["c"].members.values():
+        assert abs(position.x - center.x) <= MEMBER_SPACING * 1.5
+        assert abs(position.y - center.y) <= MEMBER_SPACING * 1.5
+
+
+def test_cluster_layout_handles_missing_years() -> None:
+    layouts = compute_cluster_layout({"c": [_node("a", None), _node("b", None)]}, seed_year=None)
+    assert set(layouts["c"].members) == {"a", "b"}
+
+
+def test_empty_cluster_map_is_no_layout() -> None:
+    assert compute_cluster_layout({}, seed_year=2020) == {}
+
+
+def test_crowded_years_are_spread_further_apart() -> None:
+    """A fixed fan-out step drew twenty same-year papers on top of each other."""
+    def spread(count: int) -> float:
+        nodes = [_node(f"n{i}", 2020) for i in range(count)]
+        positions = compute_positions(nodes, seed_id="n0")
+        xs = [p.x for p in positions.values()]
+        return max(xs) - min(xs)
+
+    assert spread(20) / 20 > spread(4) / 4

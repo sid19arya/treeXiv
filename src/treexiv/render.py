@@ -4,11 +4,25 @@ No frontend framework, no build step, no CDN dependency (vis-network is
 vendored in `treexiv/assets/vis-network/` and inlined) - just one HTML file
 per run, per the PRD's non-goals.
 
-Layout: `layout.compute_positions` places nodes on a diagonal by publication
-year (older top-left, newer bottom-right, seed centered) instead of letting
-vis-network's physics engine decide - see that module for why. Each node
-also carries a `narrative.describe_relationship` string, shown in the left
-sidebar when that node is selected.
+Two views, chosen by whether the graph has concept clusters:
+
+- **Clustered** (the curated path). The page opens showing one node per
+  concept cluster, not per paper - a handful of named strands instead of
+  thirty-odd dots. Clicking a cluster expands it in place into its papers;
+  clicking again collapses it. Edges are aggregated to whatever is currently
+  visible, so a citation between two collapsed clusters is drawn once, thick,
+  between them.
+- **Flat** (the BM25 path, or any graph with no clusters). Every paper on the
+  year diagonal, as before.
+
+Expansion is done by rebuilding the two vis-network DataSets from a visibility
+map rather than by vis-network's own `cluster()` API. Positions are all
+computed up front in `layout.py` and physics stays off, so nothing moves when
+a cluster opens - which is the entire point of a deterministic layout, and
+something the built-in clustering makes hard to guarantee.
+
+Each node also carries a `narrative.describe_relationship` string, shown in
+the left sidebar when that node is selected.
 """
 
 from __future__ import annotations
@@ -18,13 +32,28 @@ from importlib import resources
 from pathlib import Path
 
 from treexiv.curate import seed_edge_intents
-from treexiv.layout import Position, compute_positions
+from treexiv.layout import Position, compute_cluster_layout, compute_positions
 from treexiv.models import Cluster, FilteredGraph, LineageNarrative, Node, ScoredNode
 from treexiv.narrative import describe_relationship
 
 _HOP_COLORS = {0: "#f2a900", 1: "#2a9d8f", 2: "#8ecae6"}
 _DEFAULT_COLOR = "#cbd5e1"
 _HOP_LABELS = {0: "Seed", 1: "1 hop away", 2: "2 hops away"}
+_SEED_COLOR = "#f2a900"
+_SEED_BORDER = "#7c4a03"
+
+# Clusters are coloured by their role in the lineage, which is the one thing a
+# reader wants from the collapsed view: what came before, what came after.
+_ROLE_COLORS = {
+    "ancestor": "#2a9d8f",
+    "descendant": "#8ecae6",
+    "contemporary": "#c8b6e2",
+}
+_ROLE_LABELS = {
+    "ancestor": "Where the idea came from",
+    "descendant": "What it grew into",
+    "contemporary": "Parallel work",
+}
 
 
 def _load_asset(name: str) -> str:
@@ -78,8 +107,8 @@ def _node_payload(
         "x": position.x,
         "y": position.y,
         "color": {
-            "background": "#f2a900" if is_seed else _HOP_COLORS.get(node.hop, _DEFAULT_COLOR),
-            "border": "#7c4a03" if is_seed else "#334155",
+            "background": _SEED_COLOR if is_seed else _HOP_COLORS.get(node.hop, _DEFAULT_COLOR),
+            "border": _SEED_BORDER if is_seed else "#334155",
         },
         "size": 14 + min(node.cited_by_count, 5000) ** 0.5,
         "borderWidth": 3 if is_seed else 1.5,
@@ -90,11 +119,7 @@ def _node_payload(
 def _narrative_payload(
     narrative: LineageNarrative | None, clusters: list[Cluster]
 ) -> dict | None:
-    """The written lineage story, or None when a run produced no prose.
-
-    Clusters ride along here rather than on each node: the story panel lists
-    them, and every node already carries its `cluster_id`.
-    """
+    """The written lineage story, or None when a run produced no prose."""
     if narrative is None and not clusters:
         return None
     return {
@@ -104,8 +129,79 @@ def _narrative_payload(
             {"title": b.title, "text": b.text, "node_ids": b.node_ids}
             for b in (narrative.beats if narrative else [])
         ],
-        "clusters": [c.to_dict() for c in clusters],
     }
+
+
+def _cluster_payloads(graph: FilteredGraph) -> tuple[list[dict], dict[str, Position]]:
+    """One collapsed node per concept cluster, plus every member's position.
+
+    Returns an empty list for a graph with no clusters, which is what puts the
+    renderer into its flat view.
+    """
+    members_by_cluster: dict[str, list[Node]] = {}
+    for scored in graph.nodes:
+        if scored.node.id == graph.seed_id or not scored.cluster_id:
+            continue
+        members_by_cluster.setdefault(scored.cluster_id, []).append(scored.node)
+    if not members_by_cluster:
+        return [], {}
+
+    seed_node = next((sn.node for sn in graph.nodes if sn.node.id == graph.seed_id), None)
+    layouts = compute_cluster_layout(
+        members_by_cluster, seed_node.publication_year if seed_node else None
+    )
+
+    positions: dict[str, Position] = {}
+    for cluster_layout in layouts.values():
+        positions.update(cluster_layout.members)
+
+    payloads = []
+    for cluster in graph.clusters:
+        members = members_by_cluster.get(cluster.id)
+        placed = layouts.get(cluster.id)
+        if not members or placed is None:
+            continue
+        years = [n.publication_year for n in members if n.publication_year is not None]
+        payloads.append(
+            {
+                "id": f"cluster:{cluster.id}",
+                "cluster_id": cluster.id,
+                "label": f"{cluster.name}\n({len(members)} papers)",
+                "name": cluster.name,
+                "summary": cluster.summary,
+                "role": cluster.role,
+                "role_label": _ROLE_LABELS.get(cluster.role, cluster.role),
+                "member_ids": [n.id for n in members],
+                "count": len(members),
+                "span": f"{min(years)}\u2013{max(years)}" if years else "",
+                "x": placed.center.x,
+                "y": placed.center.y,
+                "color": {
+                    "background": _ROLE_COLORS.get(cluster.role, _DEFAULT_COLOR),
+                    "border": "#334155",
+                },
+                "size": 26 + min(len(members), 40) ** 0.6 * 6,
+                "font": {"size": 16, "face": "-apple-system, Segoe UI, Roboto, sans-serif"},
+            }
+        )
+    return payloads, positions
+
+
+def _legend(cluster_payloads: list[dict]) -> list[dict]:
+    """Legend entries: cluster roles in the clustered view, hops in the flat one."""
+    if not cluster_payloads:
+        return [{"color": _HOP_COLORS[h], "label": _HOP_LABELS[h]} for h in (0, 1, 2)]
+    entries = [{"color": _SEED_COLOR, "label": "Seed paper"}]
+    seen: set[str] = set()
+    for payload in cluster_payloads:
+        role = payload["role"]
+        if role in seen:
+            continue
+        seen.add(role)
+        entries.append(
+            {"color": _ROLE_COLORS.get(role, _DEFAULT_COLOR), "label": payload["role_label"]}
+        )
+    return entries
 
 
 def _stats_text(graph: FilteredGraph, edge_payloads: list[dict]) -> str:
@@ -128,7 +224,11 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
     """
     out_path = Path(out_path)
     nodes_by_id = {sn.node.id: sn.node for sn in graph.nodes}
+    cluster_payloads, member_positions = _cluster_payloads(graph)
+    # Papers inside a cluster sit at their in-cluster position; the seed, and
+    # anything the curator left unclustered, falls back to the flat diagonal.
     positions = compute_positions([sn.node for sn in graph.nodes], graph.seed_id)
+    positions.update(member_positions)
 
     intents_by_node = seed_edge_intents(graph.seed_id, graph.edges)
     node_payloads = [
@@ -174,13 +274,14 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
     )
     html = html.replace(
         "__HOP_LEGEND_JSON__",
-        _escape_for_inline_script(
-            json.dumps([{"color": _HOP_COLORS[h], "label": _HOP_LABELS[h]} for h in (0, 1, 2)])
-        ),
+        _escape_for_inline_script(json.dumps(_legend(cluster_payloads))),
     )
     html = html.replace(
         "__NARRATIVE_JSON__",
         _escape_for_inline_script(json.dumps(_narrative_payload(graph.narrative, graph.clusters))),
+    )
+    html = html.replace(
+        "__CLUSTERS_JSON__", _escape_for_inline_script(json.dumps(cluster_payloads))
     )
     html = html.replace("__VIS_NETWORK_JS__", _load_asset("vis-network.min.js"))
     html = html.replace("__VIS_NETWORK_CSS__", _load_asset("vis-network.css"))
@@ -253,6 +354,23 @@ _TEMPLATE = r"""<!doctype html>
   #story .cluster-row .role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
     color: var(--muted); flex: none; padding-top: 2px; }
 
+  #cluster .toggle { display: block; margin: 10px 0 2px; font: inherit; font-size: 12px;
+    color: #1d4ed8; background: none; border: 1px solid var(--border); border-radius: 5px;
+    padding: 5px 10px; cursor: pointer; }
+  #cluster .toggle:hover { background: #f1f5f9; }
+  #cluster .members { margin-top: 4px; }
+  #cluster .member { width: 100%; text-align: left; display: block; background: none;
+    border: none; border-bottom: 1px solid var(--border); padding: 8px 0; cursor: pointer;
+    font: inherit; color: inherit; }
+  #cluster .member:hover { background: #f8fafc; }
+  #cluster .member .m-title { font-size: 12.5px; line-height: 1.4; }
+  #cluster .member .m-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  #hint { position: absolute; top: 74px; left: 18px; z-index: 5; font-size: 11px;
+    color: var(--muted); background: rgba(255,255,255,0.92); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; }
+  #expand-all { margin-left: 8px; font: inherit; font-size: 11px; color: #1d4ed8;
+    background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0; }
+
   #graph-pane { flex: 1; position: relative; min-width: 0; }
   #topbar { position: absolute; top: 0; left: 0; right: 0; z-index: 5; padding: 14px 18px;
     background: linear-gradient(to bottom, rgba(248,250,252,.96), rgba(248,250,252,0)); }
@@ -281,6 +399,16 @@ _TEMPLATE = r"""<!doctype html>
       <div class="section-label" id="story-clusters-label" style="display:none;">Strands</div>
       <div id="story-clusters"></div>
     </div>
+    <div id="cluster" style="display:none;">
+      <span class="badge" id="cluster-badge">Strand</span>
+      <button id="cluster-back">&larr; Back to the story</button>
+      <h1 id="cluster-name"></h1>
+      <div class="meta" id="cluster-meta"></div>
+      <button id="cluster-toggle" class="toggle"></button>
+      <div class="relationship" id="cluster-summary"></div>
+      <div class="section-label">Papers in this strand</div>
+      <div class="members" id="cluster-members"></div>
+    </div>
     <div id="paper">
       <span class="badge" id="panel-badge">Seed paper</span>
       <button id="back-to-seed">&larr; Back to seed paper</button>
@@ -303,6 +431,7 @@ _TEMPLATE = r"""<!doctype html>
       <div class="stats" id="topbar-stats"></div>
     </div>
     <div id="network"></div>
+    <div id="hint" style="display:none;"></div>
     <div id="legend"></div>
   </div>
 </div>
@@ -318,7 +447,9 @@ _TEMPLATE = r"""<!doctype html>
   var HOP_LEGEND = __HOP_LEGEND_JSON__;
   var PAGE_TITLE = __PAGE_TITLE__;
   var NARRATIVE = __NARRATIVE_JSON__;
-  var HAS_STORY = !!(NARRATIVE && (NARRATIVE.overview || (NARRATIVE.clusters || []).length));
+  var CLUSTERS = __CLUSTERS_JSON__;
+  var CLUSTERED = CLUSTERS.length > 0;
+  var HAS_STORY = !!(NARRATIVE && (NARRATIVE.overview || CLUSTERED));
 
   document.title = PAGE_TITLE;
   document.getElementById("topbar-title").textContent = "Lineage for: " + SEED_LABEL;
@@ -345,14 +476,79 @@ _TEMPLATE = r"""<!doctype html>
   var nodesById = {};
   NODES.forEach(function (n) { nodesById[n.id] = n; });
 
-  var visNodes = new vis.DataSet(NODES.map(function (n) {
+  var clustersById = {};
+  var clusterOfPaper = {};   // paper id -> cluster id
+  CLUSTERS.forEach(function (c) {
+    clustersById[c.cluster_id] = c;
+    c.member_ids.forEach(function (id) { clusterOfPaper[id] = c.cluster_id; });
+  });
+
+  // Which clusters are currently open. Everything else in the graph - the
+  // seed, and any paper the curator left unclustered - is always visible.
+  var expanded = {};
+
+  function visibleIdFor(paperId) {
+    var clusterId = clusterOfPaper[paperId];
+    if (!clusterId || expanded[clusterId]) return paperId;
+    return "cluster:" + clusterId;
+  }
+
+  function paperNodeData(n) {
     return {
       id: n.id, label: n.label, title: n.title, x: n.x, y: n.y,
       color: n.color, size: n.size, borderWidth: n.borderWidth, font: n.font,
       shape: "dot"
     };
-  }));
-  var visEdges = new vis.DataSet(EDGES);
+  }
+
+  function clusterNodeData(c) {
+    return {
+      id: c.id, label: c.label, title: c.name + " - " + c.count + " papers",
+      x: c.x, y: c.y, color: c.color, size: c.size, font: c.font,
+      borderWidth: 2, shape: "dot"
+    };
+  }
+
+  function buildNodes() {
+    var out = [];
+    NODES.forEach(function (n) {
+      if (visibleIdFor(n.id) === n.id) out.push(paperNodeData(n));
+    });
+    CLUSTERS.forEach(function (c) {
+      if (!expanded[c.cluster_id]) out.push(clusterNodeData(c));
+    });
+    return out;
+  }
+
+  function buildEdges() {
+    // Every citation is redrawn between whatever is visible at each end. Two
+    // papers inside the same collapsed cluster produce a self-loop, which is
+    // dropped; several citations between the same pair collapse into one
+    // thicker edge rather than a bundle of parallel lines.
+    var byPair = {};
+    EDGES.forEach(function (e) {
+      var from = visibleIdFor(e.from);
+      var to = visibleIdFor(e.to);
+      if (from === to) return;
+      var key = from + "|" + to;
+      if (!byPair[key]) byPair[key] = { from: from, to: to, weight: 0 };
+      byPair[key].weight += 1;
+    });
+    return Object.keys(byPair).map(function (key) {
+      var e = byPair[key];
+      return {
+        id: key,
+        from: e.from,
+        to: e.to,
+        width: Math.min(1.5 + (e.weight - 1) * 0.9, 7),
+        label: e.weight > 1 ? String(e.weight) : undefined,
+        font: { size: 10, color: "#64748b", strokeWidth: 3, strokeColor: "#f8fafc" }
+      };
+    });
+  }
+
+  var visNodes = new vis.DataSet(buildNodes());
+  var visEdges = new vis.DataSet(buildEdges());
 
   var container = document.getElementById("network");
   var data = { nodes: visNodes, edges: visEdges };
@@ -377,6 +573,70 @@ _TEMPLATE = r"""<!doctype html>
   // default zoom (centered near the origin, most nodes off-screen).
   network.fit({ animation: false });
 
+  function rebuild(focusIds) {
+    // Positions are fixed up front, so a rebuild only changes which nodes are
+    // drawn - nothing slides around, and the diagonal keeps its meaning.
+    visNodes.clear();
+    visEdges.clear();
+    visNodes.add(buildNodes());
+    visEdges.add(buildEdges());
+    if (focusIds && focusIds.length) {
+      network.fit({ nodes: focusIds, animation: { duration: 400 } });
+    }
+    updateHint();
+  }
+
+  function toggleCluster(clusterId, focus) {
+    var cluster = clustersById[clusterId];
+    if (!cluster) return;
+    if (expanded[clusterId]) {
+      delete expanded[clusterId];
+      rebuild(focus === false ? null : ["cluster:" + clusterId]);
+    } else {
+      expanded[clusterId] = true;
+      rebuild(focus === false ? null : cluster.member_ids);
+    }
+  }
+
+  function openClustersFor(nodeIds) {
+    // A beat or a search can name papers inside collapsed clusters; open
+    // whatever is needed so the highlight has something to land on.
+    var changed = false;
+    nodeIds.forEach(function (id) {
+      var clusterId = clusterOfPaper[id];
+      if (clusterId && !expanded[clusterId]) {
+        expanded[clusterId] = true;
+        changed = true;
+      }
+    });
+    if (changed) rebuild(null);
+  }
+
+  var hintEl = document.getElementById("hint");
+
+  function updateHint() {
+    if (!CLUSTERED) return;
+    var openCount = Object.keys(expanded).length;
+    hintEl.style.display = "block";
+    hintEl.textContent = openCount
+      ? openCount + " of " + CLUSTERS.length + " strands open. Close one from its panel."
+      : "Each circle is a strand of the story. Click one to open it.";
+    var button = document.createElement("button");
+    button.id = "expand-all";
+    button.type = "button";
+    button.textContent = openCount === CLUSTERS.length ? "Collapse all" : "Expand all";
+    button.addEventListener("click", function () {
+      if (Object.keys(expanded).length === CLUSTERS.length) {
+        expanded = {};
+      } else {
+        CLUSTERS.forEach(function (c) { expanded[c.cluster_id] = true; });
+      }
+      rebuild(null);
+      network.fit({ animation: { duration: 400 } });
+    });
+    hintEl.appendChild(button);
+  }
+
   function fmtAuthors(authors) {
     if (!authors || !authors.length) return "Authors unknown";
     if (authors.length <= 4) return authors.join(", ");
@@ -385,6 +645,67 @@ _TEMPLATE = r"""<!doctype html>
 
   var storyEl = document.getElementById("story");
   var paperEl = document.getElementById("paper");
+  var clusterEl = document.getElementById("cluster");
+
+  function showPanel(which) {
+    storyEl.style.display = which === "story" ? "block" : "none";
+    paperEl.style.display = which === "paper" ? "block" : "none";
+    clusterEl.style.display = which === "cluster" ? "block" : "none";
+  }
+
+  function showCluster(clusterId) {
+    var cluster = clustersById[clusterId];
+    if (!cluster) return;
+    showPanel("cluster");
+    document.getElementById("cluster-badge").textContent = cluster.role_label;
+    document.getElementById("cluster-name").textContent = cluster.name;
+    document.getElementById("cluster-meta").textContent =
+      cluster.count + (cluster.count === 1 ? " paper" : " papers") +
+      (cluster.span ? " \u00b7 " + cluster.span : "");
+    var summaryEl = document.getElementById("cluster-summary");
+    summaryEl.textContent = cluster.summary || "";
+    summaryEl.style.display = cluster.summary ? "block" : "none";
+
+    var toggle = document.getElementById("cluster-toggle");
+    toggle.textContent = expanded[clusterId]
+      ? "Collapse this strand" : "Open this strand in the graph";
+    toggle.onclick = function () {
+      toggleCluster(clusterId);
+      showCluster(clusterId);
+    };
+
+    var membersEl = document.getElementById("cluster-members");
+    membersEl.innerHTML = "";
+    cluster.member_ids
+      .map(function (id) { return nodesById[id]; })
+      .filter(Boolean)
+      .sort(function (a, b) {
+        return (a.publication_year || 0) - (b.publication_year || 0);
+      })
+      .forEach(function (n) {
+        var btn = document.createElement("button");
+        btn.className = "member";
+        btn.type = "button";
+        var title = document.createElement("div");
+        title.className = "m-title";
+        title.textContent = n.title;
+        var meta = document.createElement("div");
+        meta.className = "m-meta";
+        meta.textContent = [n.publication_year, n.cited_by_count + " citations"]
+          .filter(Boolean).join(" \u00b7 ");
+        btn.appendChild(title);
+        btn.appendChild(meta);
+        btn.addEventListener("click", function () {
+          // The paper may be inside a still-closed strand; open it so there is
+          // something on the canvas to select.
+          openClustersFor([n.id]);
+          network.selectNodes([n.id]);
+          network.focus(n.id, { scale: 1, animation: { duration: 400 } });
+          showNode(n.id);
+        });
+        membersEl.appendChild(btn);
+      });
+  }
 
   function buildStory() {
     if (!HAS_STORY) return;
@@ -429,17 +750,19 @@ _TEMPLATE = r"""<!doctype html>
         });
         btn.classList.add("active");
         if (!ids.length) return;
+        // Open whichever strands hold this beat's papers, so the highlight
+        // lands on the papers themselves rather than on a closed circle.
+        openClustersFor(ids);
         network.selectNodes(ids);
         network.fit({ nodes: ids, animation: { duration: 400 } });
       });
       beatsEl.appendChild(btn);
     });
 
-    var clusters = NARRATIVE.clusters || [];
-    if (clusters.length) {
+    if (CLUSTERS.length) {
       document.getElementById("story-clusters-label").style.display = "block";
       var clustersEl = document.getElementById("story-clusters");
-      clusters.forEach(function (cluster) {
+      CLUSTERS.forEach(function (cluster) {
         var row = document.createElement("div");
         row.className = "cluster-row";
         var role = document.createElement("span");
@@ -452,6 +775,13 @@ _TEMPLATE = r"""<!doctype html>
         body.appendChild(document.createTextNode(cluster.summary || ""));
         row.appendChild(role);
         row.appendChild(body);
+        row.style.cursor = "pointer";
+        row.addEventListener("click", function () {
+          network.selectNodes(
+            expanded[cluster.cluster_id] ? cluster.member_ids : [cluster.id]
+          );
+          showCluster(cluster.cluster_id);
+        });
         clustersEl.appendChild(row);
       });
     }
@@ -461,15 +791,13 @@ _TEMPLATE = r"""<!doctype html>
     // The story is the resting state when there is one; without it the seed
     // paper keeps that role, exactly as before narratives existed.
     if (!HAS_STORY) { showNode(SEED_ID); return; }
-    storyEl.style.display = "block";
-    paperEl.style.display = "none";
+    showPanel("story");
   }
 
   function showNode(id) {
     var n = nodesById[id];
     if (!n) return;
-    storyEl.style.display = "none";
-    paperEl.style.display = "block";
+    showPanel("paper");
     var isSeed = id === SEED_ID;
     document.getElementById("panel-badge").textContent = isSeed
       ? "Seed paper" : "Hop " + n.hop + (n.hop === 1 ? " — direct neighbor" : " — indirect");
@@ -522,17 +850,29 @@ _TEMPLATE = r"""<!doctype html>
     network.unselectAll();
     showStory();
   });
+  document.getElementById("cluster-back").addEventListener("click", function () {
+    network.unselectAll();
+    showStory();
+  });
 
   network.on("click", function (params) {
-    if (params.nodes && params.nodes.length) {
-      showNode(params.nodes[0]);
-    } else {
+    if (!params.nodes || !params.nodes.length) {
       network.unselectAll();
       showStory();
+      return;
     }
+    var id = params.nodes[0];
+    if (id.indexOf("cluster:") === 0) {
+      var clusterId = id.slice("cluster:".length);
+      toggleCluster(clusterId);
+      showCluster(clusterId);
+      return;
+    }
+    showNode(id);
   });
 
   buildStory();
+  updateHint();
   showStory();
 })();
 </script>
