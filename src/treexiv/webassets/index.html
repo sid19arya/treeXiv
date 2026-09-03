@@ -55,6 +55,15 @@
   .result .stat { font-size: 13px; color: var(--muted); margin: 4px 0 14px; }
   .result .actions { display: flex; gap: 10px; flex-wrap: wrap; }
   a.dl { align-self: center; font-size: 13px; color: var(--accent); }
+  .result .headline { font-size: 15px; line-height: 1.45; font-weight: 600; margin: 2px 0 12px; }
+  .result .strands { margin: 0 0 14px; }
+  .result .strands .strand { font-size: 13px; line-height: 1.5; margin: 3px 0; }
+  .result .strands .strand .role { font-size: 10px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted); margin-right: 6px; }
+  .result .warnings { font-size: 12px; line-height: 1.5; color: #92400e; background: #fffbeb;
+    border: 1px solid #fde68a; border-radius: 6px; padding: 8px 10px; margin: 0 0 14px; }
+  select { font: inherit; padding: 7px 8px; border: 1px solid var(--border);
+    border-radius: 6px; background: #fff; width: 100%; }
   .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #ccc;
     border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
     vertical-align: -2px; margin-right: 6px; }
@@ -65,7 +74,8 @@
 <main>
   <h1>TreeXiv</h1>
   <p class="sub">Trace a paper's citation lineage. Search a seed paper, state the idea you
-    care about, get an interactive graph.</p>
+    care about, and get back the strands of how it developed — as a written story and an
+    interactive graph.</p>
 
   <section class="step">
     <h2>1 · Find the seed paper</h2>
@@ -95,7 +105,14 @@
     <details>
       <summary>Advanced</summary>
       <div class="adv">
-        <div><label for="top_k">Keep top-K</label>
+        <div><label for="curation">How papers are chosen</label>
+          <select id="curation">
+            <option value="auto">LLM curation (slower, far better)</option>
+            <option value="bm25">Keyword top-K (fast)</option>
+          </select></div>
+        <div><label for="max_nodes">Max papers kept</label>
+          <input type="text" id="max_nodes" placeholder="35" inputmode="numeric"></div>
+        <div><label for="top_k">Keep top-K (keyword mode)</label>
           <input type="text" id="top_k" placeholder="40" inputmode="numeric"></div>
         <div><label for="total_cap">Total cap</label>
           <input type="text" id="total_cap" placeholder="400" inputmode="numeric"></div>
@@ -113,6 +130,9 @@
     <h2>Lineage graph</h2>
     <div id="resolved" class="stat"></div>
     <div id="counts" class="stat"></div>
+    <div id="headline" class="headline" hidden></div>
+    <div id="strands" class="strands" hidden></div>
+    <div id="warnings" class="warnings" hidden></div>
     <div class="actions">
       <button type="button" id="open-btn">Open graph &#8599;</button>
       <a class="dl" id="dl" download>Download HTML</a>
@@ -292,12 +312,19 @@
     var idea = $("idea").value.trim();
     if (!idea) { setMsg($("run-msg"), "Enter a core idea first.", "err"); return; }
     $("run-btn").disabled = true;
+    var curation = $("curation").value;
     setMsg($("run-msg"),
-      '<span class="spinner"></span>Expanding the citation graph and filtering — ' +
-      'this usually takes 20–60s (longer on a cold start)…', "work");
+      '<span class="spinner"></span>' + (curation === "bm25"
+        ? 'Expanding the citation graph and filtering — this usually takes 20–60s ' +
+          '(longer on a cold start)…'
+        : 'Expanding the citation graph, then reading the shortlist to pick the papers ' +
+          'that matter and write the story. Curation is the slow part — give it a few ' +
+          'minutes (longer on a cold start)…'), "work");
     try {
       var body = {
         work_id: selected.id, idea: idea,
+        curation: curation,
+        max_nodes: intOrNull("max_nodes"),
         top_k: intOrNull("top_k"),
         total_cap: intOrNull("total_cap"),
         fanout_cap: intOrNull("fanout_cap")
@@ -314,9 +341,47 @@
         "Resolved to: " + data.seed_title +
         (data.seed_year ? " (" + data.seed_year + ")" : "") +
         " — check this is the paper you meant.";
+      var how = data.curation === "llm" ? "curated" : "kept by keyword score";
       $("counts").textContent =
-        data.expanded + " papers expanded → " + data.kept + " kept · " +
-        data.edges + " edges" + (data.truncated ? " · expansion hit a cap" : "");
+        data.expanded + " papers expanded → " + data.kept + " " + how + " · " +
+        data.edges + " edges" +
+        (data.clusters && data.clusters.length
+          ? " · " + data.clusters.length + " strands" : "") +
+        (data.intents_labelled
+          ? " · " + data.intents_labelled + " edges labelled with citation intent" : "") +
+        (data.truncated ? " · expansion hit a cap" : "");
+
+      var headlineEl = $("headline");
+      headlineEl.textContent = data.headline || "";
+      headlineEl.hidden = !data.headline;
+
+      var strandsEl = $("strands");
+      strandsEl.innerHTML = "";
+      (data.clusters || []).forEach(function (c) {
+        var row = document.createElement("div");
+        row.className = "strand";
+        var role = document.createElement("span");
+        role.className = "role";
+        role.textContent = c.role;
+        var name = document.createElement("b");
+        name.textContent = c.name + ". ";
+        row.appendChild(role);
+        row.appendChild(name);
+        row.appendChild(document.createTextNode(c.summary || ""));
+        strandsEl.appendChild(row);
+      });
+      strandsEl.hidden = !(data.clusters && data.clusters.length);
+
+      // A run that quietly fell back to the keyword filter still returns a
+      // graph; the user should know that is what they are looking at.
+      var warnEl = $("warnings");
+      warnEl.innerHTML = "";
+      (data.warnings || []).forEach(function (w) {
+        var line = document.createElement("div");
+        line.textContent = w;
+        warnEl.appendChild(line);
+      });
+      warnEl.hidden = !(data.warnings && data.warnings.length);
       var dl = $("dl");
       dl.href = blobUrl;
       dl.setAttribute("download", "treexiv-" + data.seed_id + ".html");

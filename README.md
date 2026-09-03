@@ -93,7 +93,15 @@ Run `uv run treexiv --help` for the full command list (`identify-seed`,
 
 There's a single-page web front-end (`treexiv.web`, a small FastAPI app) that
 wraps the same pipeline: search a seed (or describe it and let Step 0 guess),
-pick the right match, state the idea, get the HTML back in the browser. It's
+pick the right match, state the idea, get the HTML back in the browser — with
+the lineage headline and concept strands shown alongside it, and any fallback
+(no LLM key, Semantic Scholar rate-limited) reported in the page rather than
+only on a server log.
+
+**One thing to know before deploying:** a curated run takes minutes, dominated
+by the curation call. If your host puts a timeout on inbound requests, either
+raise it or run the web app with the "Keyword top-K" option, which returns in
+seconds. It's
 built to run on [Render](https://render.com)'s free tier and is **private** —
 every route except `/health` is behind HTTP Basic Auth, so without your
 credentials a request gets a `401` and nothing runs.
