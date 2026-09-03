@@ -29,9 +29,27 @@ def normalize_work_id(raw_id: str) -> str:
     return stripped.upper() if stripped[:1].lower() == "w" else stripped
 
 
+def normalize_doi(raw: str | None) -> str | None:
+    """Reduce a DOI to its bare lowercase form, however it was written."""
+    if not raw:
+        return None
+    value = raw.strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if value.startswith(prefix):
+            value = value[len(prefix) :]
+    return value or None
+
+
 @dataclass(slots=True)
 class Work:
-    """A work record as returned by the OpenAlex `/works` endpoint (subset of fields)."""
+    """A paper record, as returned by OpenAlex `/works` or the Semantic Scholar
+    Graph API (subset of fields, common shape).
+
+    Abstracts arrive differently by source: OpenAlex sends an inverted index to
+    reassemble, S2 sends plain text. `abstract` hides that difference, and
+    `external_ids` (doi / arxiv / corpusid) is what lets the same paper be
+    recognized across both.
+    """
 
     id: str
     title: str
@@ -42,10 +60,36 @@ class Work:
     doi: str | None = None
     referenced_works: list[str] = field(default_factory=list)
     abstract_inverted_index: dict[str, list[int]] | None = None
+    abstract_text: str = ""
+    external_ids: dict[str, str] = field(default_factory=dict)
+    source: str = "openalex"
 
     @property
     def abstract(self) -> str:
-        return reconstruct_abstract(self.abstract_inverted_index)
+        return self.abstract_text or reconstruct_abstract(self.abstract_inverted_index)
+
+    @property
+    def dedupe_key(self) -> str:
+        """A cross-source identity for this paper.
+
+        DOI first, then arXiv ID, then the source's own ID. Two records of the
+        same paper from different sources agree on the first two; falling
+        through to the source ID means a paper with neither identifier can
+        appear twice in a mixed-source graph, which is the honest outcome —
+        there is nothing to match it on.
+        """
+        doi = self.normalized_doi
+        if doi:
+            return f"doi:{doi}"
+        arxiv = self.external_ids.get("arxiv")
+        if arxiv:
+            return f"arxiv:{arxiv.lower()}"
+        return f"id:{self.id}"
+
+    @property
+    def normalized_doi(self) -> str | None:
+        """The bare, lowercased DOI, however the source expressed it."""
+        return normalize_doi(self.doi or self.external_ids.get("doi"))
 
     @classmethod
     def from_api(cls, payload: dict) -> Work:
@@ -68,7 +112,26 @@ class Work:
             doi=payload.get("doi"),
             referenced_works=[normalize_work_id(w) for w in payload.get("referenced_works") or []],
             abstract_inverted_index=payload.get("abstract_inverted_index"),
+            external_ids=_openalex_external_ids(payload),
+            source="openalex",
         )
+
+
+def _openalex_external_ids(payload: dict) -> dict[str, str]:
+    """The cross-source identifiers OpenAlex carries, lowercased and bare."""
+    ids = payload.get("ids") or {}
+    out: dict[str, str] = {}
+    doi = ids.get("doi") or payload.get("doi")
+    if doi:
+        out["doi"] = str(doi).replace("https://doi.org/", "").lower()
+    mag = ids.get("mag")
+    if mag:
+        out["mag"] = str(mag)
+    location = payload.get("primary_location") or {}
+    landing = location.get("landing_page_url") or ""
+    if "arxiv.org/abs/" in landing:
+        out["arxiv"] = landing.rsplit("/", 1)[-1]
+    return out
 
 
 @dataclass(slots=True)
@@ -85,6 +148,8 @@ class Node:
     abstract: str
     hop: int
     doi: str | None = None
+    external_ids: dict[str, str] = field(default_factory=dict)
+    source: str = "openalex"
 
     @classmethod
     def from_work(cls, work: Work, hop: int) -> Node:
@@ -98,6 +163,8 @@ class Node:
             abstract=work.abstract,
             hop=hop,
             doi=work.doi,
+            external_ids=dict(work.external_ids),
+            source=work.source,
         )
 
     def to_dict(self) -> dict:
@@ -111,6 +178,8 @@ class Node:
             "abstract": self.abstract,
             "hop": self.hop,
             "doi": self.doi,
+            "external_ids": self.external_ids,
+            "source": self.source,
         }
 
     @classmethod
@@ -125,22 +194,53 @@ class Node:
             abstract=payload.get("abstract", ""),
             hop=payload.get("hop", 0),
             doi=payload.get("doi"),
+            external_ids=payload.get("external_ids") or {},
+            source=payload.get("source", "openalex"),
         )
 
 
 @dataclass(slots=True, frozen=True)
 class Edge:
-    """A citation edge: `source` cites `target` (source is the citing work)."""
+    """A citation edge: `source` cites `target` (source is the citing work).
+
+    `intents` and `is_influential` come from Semantic Scholar's classification
+    of the citation context, and are only populated for edges S2 was asked
+    about — in practice the seed paper's own references and citations. An edge
+    discovered by OpenAlex traversal carries no intent, which is a gap in what
+    we know about it, not a claim that the citation is incidental.
+
+    A tuple, not a list, so the dataclass stays hashable and cheap to dedupe.
+    """
 
     source: str
     target: str
+    intents: tuple[str, ...] = ()
+    is_influential: bool = False
+
+    def with_intents(self, intents: tuple[str, ...], is_influential: bool) -> Edge:
+        return Edge(
+            source=self.source,
+            target=self.target,
+            intents=intents,
+            is_influential=is_influential,
+        )
 
     def to_dict(self) -> dict:
-        return {"source": self.source, "target": self.target}
+        return {
+            "source": self.source,
+            "target": self.target,
+            "intents": list(self.intents),
+            "is_influential": self.is_influential,
+        }
 
     @classmethod
     def from_dict(cls, payload: dict) -> Edge:
-        return cls(source=payload["source"], target=payload["target"])
+        return cls(
+            source=payload["source"],
+            target=payload["target"],
+            intents=tuple(payload.get("intents") or ()),
+            is_influential=payload.get("is_influential", False),
+        )
 
 
 @dataclass(slots=True)

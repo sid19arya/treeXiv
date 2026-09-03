@@ -12,6 +12,13 @@ from treexiv.models import Edge, Node
 
 SEED_DESCRIPTION = "This is the seed paper the whole tree is built from."
 
+# Semantic Scholar's citation-intent vocabulary, in words a reader recognizes.
+_INTENT_WORDS = {
+    "background": "background",
+    "methodology": "its method",
+    "result": "its result",
+}
+
 
 def _find_edge(edges: list[Edge], a: str, b: str) -> Edge | None:
     """The edge directly connecting `a` and `b`, in either direction."""
@@ -21,10 +28,35 @@ def _find_edge(edges: list[Edge], a: str, b: str) -> Edge | None:
     return None
 
 
+def describe_intents(edge: Edge) -> str:
+    """Semantic Scholar's read on what a citation was *for*, as a clause.
+
+    Empty when the edge carries no intent data — most edges don't, since only
+    the seed's own references and citations are looked up (see
+    `sources/enrich.py`). Absence means "not checked", not "incidental".
+    """
+    parts = []
+    if edge.intents:
+        readable = [_INTENT_WORDS.get(i, i) for i in edge.intents]
+        parts.append("cited for " + _join(readable))
+    if edge.is_influential:
+        parts.append("flagged as an influential citation")
+    return "; ".join(parts)
+
+
+def _join(items: list[str]) -> str:
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
 def _direct_relationship(edge: Edge, node_id: str, seed_id: str) -> str:
     if edge.source == seed_id and edge.target == node_id:
-        return "The seed paper cites this one directly - it's part of what the seed built on."
-    return "This paper cites the seed directly - it's part of what grew out of the seed."
+        base = "The seed paper cites this one directly - it's part of what the seed built on."
+    else:
+        base = "This paper cites the seed directly - it's part of what grew out of the seed."
+    detail = describe_intents(edge)
+    return f"{base} ({detail.capitalize()}.)" if detail else base
 
 
 def _edge_phrase(edge: Edge, id_a: str, title_a: str, id_b: str, title_b: str) -> str:

@@ -17,6 +17,7 @@ import json
 from importlib import resources
 from pathlib import Path
 
+from treexiv.curate import seed_edge_intents
 from treexiv.layout import Position, compute_positions
 from treexiv.models import Cluster, FilteredGraph, LineageNarrative, Node, ScoredNode
 from treexiv.narrative import describe_relationship
@@ -53,7 +54,7 @@ def _escape_for_inline_script(payload: str) -> str:
 
 
 def _node_payload(
-    scored: ScoredNode, is_seed: bool, relationship: str, position: Position
+    scored: ScoredNode, is_seed: bool, relationship: str, position: Position, intents: str
 ) -> dict:
     node, score = scored.node, scored.score
     return {
@@ -73,6 +74,7 @@ def _node_payload(
         "why": scored.why,
         "cluster_id": scored.cluster_id,
         "importance": scored.importance,
+        "intents": intents,
         "x": position.x,
         "y": position.y,
         "color": {
@@ -128,12 +130,14 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
     nodes_by_id = {sn.node.id: sn.node for sn in graph.nodes}
     positions = compute_positions([sn.node for sn in graph.nodes], graph.seed_id)
 
+    intents_by_node = seed_edge_intents(graph.seed_id, graph.edges)
     node_payloads = [
         _node_payload(
             sn,
             sn.node.id == graph.seed_id,
             describe_relationship(sn.node.id, graph.seed_id, nodes_by_id, graph.edges),
             positions[sn.node.id],
+            intents_by_node.get(sn.node.id, ""),
         )
         for sn in graph.nodes
     ]
@@ -225,6 +229,9 @@ _TEMPLATE = r"""<!doctype html>
   #sidebar a.doi:hover { text-decoration: underline; }
   #back-to-seed { display: none; font-size: 12px; color: #1d4ed8; background: none;
     border: none; cursor: pointer; padding: 0 0 14px; text-decoration: underline; }
+  #sidebar .intents { font-size: 11px; color: #475569; background: #eef2ff;
+    border: 1px solid #c7d2fe; border-radius: 999px; padding: 4px 10px;
+    display: inline-block; margin-bottom: 10px; }
   #sidebar .why { margin: 14px 0; padding: 12px 14px; background: #fffbeb;
     border-left: 3px solid var(--accent); border-radius: 4px; font-size: 13px;
     line-height: 1.5; }
@@ -284,6 +291,7 @@ _TEMPLATE = r"""<!doctype html>
       <a class="doi" id="panel-doi" href="#" target="_blank" rel="noopener"></a>
       <div class="why" id="panel-why" style="display:none;"></div>
       <div class="relationship" id="panel-relationship" style="display:none;"></div>
+      <div class="intents" id="panel-intents" style="display:none;"></div>
       <div class="section-label">Abstract</div>
       <div class="abstract" id="panel-abstract"></div>
     </div>
@@ -496,6 +504,13 @@ _TEMPLATE = r"""<!doctype html>
     } else {
       relEl.textContent = n.relationship;
       relEl.style.display = "block";
+    }
+    var intentEl = document.getElementById("panel-intents");
+    if (n.intents) {
+      intentEl.textContent = "Citation intent (Semantic Scholar): " + n.intents;
+      intentEl.style.display = "block";
+    } else {
+      intentEl.style.display = "none";
     }
     document.getElementById("panel-abstract").textContent = n.abstract;
     var back = document.getElementById("back-to-seed");

@@ -341,3 +341,63 @@ def test_filter_command_falls_back_to_bm25_without_a_key(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert "OPENROUTER_API_KEY unset" in result.output
     assert json.loads(out_json.read_text(encoding="utf-8"))["curation"] == "bm25"
+
+
+@respx.mock
+def test_search_seed_puts_the_s2_title_match_first(monkeypatch) -> None:
+    """S2's title matcher answers "which paper is this?" better than OpenAlex
+    relevance search, so its match leads — resolved to an OpenAlex ID."""
+    monkeypatch.setenv("TREEXIV_SOURCE", "auto")
+    monkeypatch.setenv("TREEXIV_S2_MIN_INTERVAL", "0")
+    respx.get("https://api.semanticscholar.org/graph/v1/paper/search/match").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "paperId": "s1",
+                        "externalIds": {"DOI": "10.0/exact"},
+                        "title": "The Exact Paper",
+                        "year": 2024,
+                        "citationCount": 500,
+                        "authors": [{"name": "Ada Example"}],
+                    }
+                ]
+            },
+        )
+    )
+    exact = make_work_payload("W_EXACT", "The Exact Paper", cited_by_count=500)
+    exact["doi"] = "https://doi.org/10.0/exact"
+    other = make_work_payload("W_OTHER", "A Loosely Related Paper")
+    respx.get("https://api.openalex.org/works").mock(
+        side_effect=[
+            httpx.Response(200, json={"results": [exact]}),   # DOI cross-walk
+            httpx.Response(200, json={"results": [other]}),   # relevance search
+        ]
+    )
+    result = CliRunner().invoke(main, ["search-seed", "The Exact Paper"])
+    assert result.exit_code == 0, result.output
+    candidates = json.loads(result.output)
+    assert candidates[0]["id"] == "W_EXACT"
+    assert candidates[0]["matched_by"] == "semantic_scholar"
+    assert candidates[1]["matched_by"] == "openalex_search"
+
+
+@respx.mock
+def test_search_seed_falls_back_to_openalex_when_s2_is_rate_limited(monkeypatch) -> None:
+    monkeypatch.setenv("TREEXIV_SOURCE", "auto")
+    monkeypatch.setenv("TREEXIV_S2_MIN_INTERVAL", "0")
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    respx.get("https://api.semanticscholar.org/graph/v1/paper/search/match").mock(
+        return_value=httpx.Response(429)
+    )
+    respx.get("https://api.openalex.org/works").mock(
+        return_value=httpx.Response(
+            200, json={"results": [make_work_payload("W1", "Recursive LMs")]}
+        )
+    )
+    result = CliRunner().invoke(main, ["search-seed", "Recursive LMs"])
+    assert result.exit_code == 0, result.output
+    candidates = json.loads(result.output)
+    assert [c["id"] for c in candidates] == ["W1"]
+    assert candidates[0]["matched_by"] == "openalex_search"
