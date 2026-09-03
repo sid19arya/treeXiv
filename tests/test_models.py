@@ -1,5 +1,6 @@
 from tests.conftest import make_work_payload
 from treexiv.models import (
+    Cluster,
     Edge,
     ExpansionResult,
     FilteredGraph,
@@ -103,3 +104,73 @@ def test_filtered_graph_round_trips_through_dict() -> None:
     assert restored.idea_text == "an idea"
     assert restored.nodes[0].score == 3.5
     assert restored.nodes[0].node.id == "W1"
+
+
+def test_filtered_graph_round_trips_clusters_and_curation_fields() -> None:
+    graph = FilteredGraph(
+        seed_id="SEED",
+        idea_text="recursive language models",
+        top_k=2,
+        nodes=[
+            ScoredNode(
+                node=Node(
+                    id="W1",
+                    title="A paper",
+                    publication_year=2021,
+                    cited_by_count=3,
+                    authors=["Ada Example"],
+                    venue="Venue",
+                    abstract="text",
+                    hop=1,
+                ),
+                score=1.5,
+                cluster_id="c1",
+                importance=4,
+                why="Extended the core idea.",
+            )
+        ],
+        edges=[Edge("W1", "SEED")],
+        clusters=[Cluster(id="c1", name="Follow-ups", summary="What grew out of it.",
+                          role="descendant")],
+        curation="llm",
+        curation_notes="Cut incidental citations.",
+    )
+
+    restored = FilteredGraph.from_dict(graph.to_dict())
+
+    assert restored.curation == "llm"
+    assert restored.curation_notes == "Cut incidental citations."
+    assert restored.clusters[0].name == "Follow-ups"
+    assert restored.clusters[0].role == "descendant"
+    assert restored.nodes[0].cluster_id == "c1"
+    assert restored.nodes[0].importance == 4
+    assert restored.nodes[0].why == "Extended the core idea."
+    assert restored.nodes[0].node.title == "A paper"
+
+
+def test_filtered_graph_reads_pre_curation_json() -> None:
+    """JSON written before curation existed still loads, as the BM25 shape."""
+    legacy = {
+        "seed_id": "SEED",
+        "idea_text": "idea",
+        "top_k": 1,
+        "nodes": [
+            {
+                "id": "SEED",
+                "title": "Seed",
+                "publication_year": 2020,
+                "cited_by_count": 0,
+                "authors": [],
+                "venue": None,
+                "abstract": "",
+                "hop": 0,
+                "doi": None,
+                "bm25_score": 0.0,
+            }
+        ],
+        "edges": [],
+    }
+    graph = FilteredGraph.from_dict(legacy)
+    assert graph.curation == "bm25"
+    assert graph.clusters == []
+    assert graph.nodes[0].cluster_id is None

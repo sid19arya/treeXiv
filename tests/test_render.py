@@ -1,7 +1,7 @@
 import json
 import re
 
-from treexiv.models import Edge, FilteredGraph, Node, ScoredNode
+from treexiv.models import Cluster, Edge, FilteredGraph, Node, ScoredNode
 from treexiv.render import render_html
 
 
@@ -154,3 +154,34 @@ def test_render_html_fits_view_synchronously_not_via_deferred_event(tmp_path) ->
     construct_idx = content.index("new vis.Network(container, data, options)")
     fit_idx = content.index("network.fit({ animation: false });")
     assert construct_idx < fit_idx < construct_idx + 600
+
+
+def test_stats_line_names_the_curation_path(tmp_path) -> None:
+    """A reader should be able to tell a curated set from a keyword top-K."""
+    seed = Node(id="SEED", title="Seed", publication_year=2020, cited_by_count=1,
+                authors=["Ada Example"], venue="Venue", abstract="", hop=0)
+    other = Node(id="W1", title="Follow-up", publication_year=2022, cited_by_count=2,
+                 authors=["Bo Example"], venue="Venue", abstract="", hop=1)
+    curated = FilteredGraph(
+        seed_id="SEED",
+        idea_text="an idea",
+        top_k=1,
+        nodes=[ScoredNode(node=seed, score=0.0), ScoredNode(node=other, score=1.0,
+                                                            cluster_id="c1", importance=4)],
+        edges=[Edge("W1", "SEED")],
+        clusters=[Cluster(id="c1", name="Follow-ups", role="descendant")],
+        curation="llm",
+    )
+    html = render_html(curated, tmp_path / "curated.html").read_text(encoding="utf-8")
+    assert "1 concept clusters" in html or "across 1 concept cluster" in html
+    assert "top-1 by keyword relevance" not in html
+
+    bm25 = FilteredGraph(
+        seed_id="SEED",
+        idea_text="an idea",
+        top_k=1,
+        nodes=[ScoredNode(node=seed, score=0.0), ScoredNode(node=other, score=1.0)],
+        edges=[],
+    )
+    html = render_html(bm25, tmp_path / "bm25.html").read_text(encoding="utf-8")
+    assert "top-1 by keyword relevance" in html
