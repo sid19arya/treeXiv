@@ -54,16 +54,22 @@ def isolate_llm_env(monkeypatch) -> None:
     """Keep the developer's real `.env` from steering the suite.
 
     `Settings.from_env()` calls `load_dotenv()`, so a local `OPENROUTER_API_KEY`
-    would otherwise flip curation-mode "auto" into a real LLM call in tests that
-    only meant to exercise the BM25 path. Setting each var to "" (rather than
+    would otherwise flip curation-mode "auto" into a real LLM call, and the
+    default source mode would reach for Semantic Scholar, in tests that only
+    meant to exercise the BM25/OpenAlex path. Setting each var to "" (rather than
     deleting it) wins, because `load_dotenv` doesn't override vars already set.
     Tests that want a key set one explicitly after this fixture runs.
     """
     for var in (
         "OPENROUTER_API_KEY",
+        "S2_API_KEY",
         "TREEXIV_CURATION",
         "TREEXIV_CURATION_PREFILTER",
         "TREEXIV_CURATION_MAX_NODES",
         "TREEXIV_CURATION_MODEL",
     ):
         monkeypatch.setenv(var, "")
+    # Semantic Scholar is off by default in tests for the same reason: it is an
+    # extra live dependency the BM25/OpenAlex paths shouldn't quietly acquire.
+    # Tests that exercise it set TREEXIV_SOURCE themselves.
+    monkeypatch.setenv("TREEXIV_SOURCE", "openalex")

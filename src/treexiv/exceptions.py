@@ -15,6 +15,15 @@ class OpenAlexAPIError(TreeXivError):
         self.status_code = status_code
 
 
+class SourceUnavailable(TreeXivError):
+    """Raised when a secondary data source (Semantic Scholar) can't serve a
+    request — rate-limited, down, or out of its per-run budget.
+
+    Callers are expected to catch this and carry on with OpenAlex alone; it
+    means "this enrichment isn't available right now", not "the run failed".
+    """
+
+
 class SeedResolutionError(TreeXivError):
     """Raised when a seed paper query cannot be resolved to any candidate."""
 

@@ -51,7 +51,11 @@ of where that idea came from and what it grew into.
 You will get the seed paper and a numbered list of candidate papers found by
 traversing citations two hops out from the seed. Each candidate is labelled
 "ancestor" (the seed's line of work cites it), "descendant" (it cites the seed's
-line of work), or "contemporary".
+line of work), or "contemporary". Some also carry a "citation intent" from
+Semantic Scholar, saying what the citation was *for*: "methodology" or "result"
+means the work was actually used or built on, "background" is often just
+context, and "influential" is a strong signal to keep. Papers with no intent
+shown were simply not checked — absence is not evidence against them.
 
 Your job is to be RUTHLESS. Most candidates are incidental citations — shared
 benchmarks, boilerplate references, tangentially related work — and including
@@ -97,6 +101,7 @@ class _Candidate:
     node: Node
     score: float
     direction: str
+    intent: str = ""
 
 
 def classify_directions(seed_id: str, edges: list[Edge], node_ids: set[str]) -> dict[str, str]:
@@ -151,6 +156,7 @@ def prefilter(expansion: ExpansionResult, idea_text: str, limit: int) -> list[_C
     directions = classify_directions(
         expansion.seed_id, expansion.edges, set(expansion.nodes.keys())
     )
+    intents = seed_edge_intents(expansion.seed_id, expansion.edges)
     ranked = sorted(
         (n for n in node_list if n.id != expansion.seed_id),
         key=lambda n: (scores.get(n.id, 0.0), n.cited_by_count),
@@ -162,9 +168,31 @@ def prefilter(expansion: ExpansionResult, idea_text: str, limit: int) -> list[_C
             node=node,
             score=scores.get(node.id, 0.0),
             direction=directions.get(node.id, "unrelated"),
+            intent=intents.get(node.id, ""),
         )
         for i, node in enumerate(ranked[:limit], start=1)
     ]
+
+
+def seed_edge_intents(seed_id: str, edges: list[Edge]) -> dict[str, str]:
+    """Per-node summary of what Semantic Scholar said about its citation to or
+    from the seed, e.g. "methodology, influential".
+
+    Only edges touching the seed carry intents (see `sources/enrich.py`), which
+    is exactly where they most affect the keep/drop call: a paper the seed
+    cites *for its method* is lineage, one cited *for background* often isn't.
+    """
+    out: dict[str, str] = {}
+    for edge in edges:
+        if seed_id not in (edge.source, edge.target):
+            continue
+        other = edge.target if edge.source == seed_id else edge.source
+        labels = list(edge.intents)
+        if edge.is_influential:
+            labels.append("influential")
+        if labels:
+            out[other] = ", ".join(labels)
+    return out
 
 
 def _describe_paper(node: Node) -> str:
@@ -191,9 +219,10 @@ def build_prompt(
         f"CANDIDATES ({len(candidates)}):",
     ]
     for candidate in candidates:
-        lines.append(
-            f"[{candidate.index}] ({candidate.direction}) {_describe_paper(candidate.node)}"
-        )
+        tags = candidate.direction
+        if candidate.intent:
+            tags += f", citation intent: {candidate.intent}"
+        lines.append(f"[{candidate.index}] ({tags}) {_describe_paper(candidate.node)}")
     system = _SYSTEM_PROMPT % {"min_keep": max(5, max_keep // 3), "max_keep": max_keep}
     return [
         {"role": "system", "content": system},

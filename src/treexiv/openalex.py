@@ -16,10 +16,13 @@ import httpx
 
 from treexiv.config import Settings
 from treexiv.exceptions import OpenAlexAPIError
-from treexiv.models import Work, normalize_work_id
+from treexiv.models import Work, normalize_doi, normalize_work_id
 
 _WORKS_PATH = "/works"
 _ID_BATCH_SIZE = 50
+# OpenAlex's OR-filter takes fewer DOIs per request than bare IDs: DOIs are
+# long, and the whole filter travels in the query string.
+_DOI_BATCH_SIZE = 25
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -116,6 +119,31 @@ class OpenAlexClient:
             for item in payload.get("results", []):
                 work = Work.from_api(item)
                 results[work.id] = work
+        return results
+
+    def get_works_by_doi(self, dois: Iterable[str]) -> dict[str, Work]:
+        """Fetch works by DOI, keyed by the bare lowercased DOI.
+
+        The cross-source join: DOI is the one identifier OpenAlex and Semantic
+        Scholar reliably agree on, so this is how an S2 paper is recognized as
+        one already in the OpenAlex graph (see `sources/enrich.py`).
+        """
+        cleaned = [normalize_doi(d) for d in dois]
+        wanted = [d for d in cleaned if d]
+        results: dict[str, Work] = {}
+        for start in range(0, len(wanted), _DOI_BATCH_SIZE):
+            batch = wanted[start : start + _DOI_BATCH_SIZE]
+            if not batch:
+                continue
+            payload = self._get(
+                _WORKS_PATH,
+                {"filter": "doi:" + "|".join(batch), "per_page": len(batch)},
+            )
+            for item in payload.get("results", []):
+                work = Work.from_api(item)
+                doi = work.normalized_doi
+                if doi:
+                    results[doi] = work
         return results
 
     def get_citing_works(

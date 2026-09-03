@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 SamplingStrategy = Literal["top_cited", "random"]
 CurationMode = Literal["auto", "llm", "bm25"]
+SourceMode = Literal["auto", "s2", "openalex"]
 
 DEFAULT_TOTAL_CORPUS_CAP = 500
 DEFAULT_PER_NODE_FANOUT_CAP = 100
@@ -44,6 +45,20 @@ DEFAULT_CURATION_MAX_NODES = 35
 # story for an already-curated graph. Only runs when curation itself ran.
 DEFAULT_NARRATIVE = True
 
+# Semantic Scholar supplies the two things OpenAlex can't: citation intents and
+# plain-text abstracts. It is used only for the seed paper and its direct
+# references/citations — unauthenticated S2 shares a rate-limit pool and 429s
+# readily, so the bulk two-hop crawl stays on OpenAlex. "auto" tries S2 and
+# carries on without it when unavailable; "openalex" skips it entirely.
+DEFAULT_SOURCE_MODE: SourceMode = "auto"
+DEFAULT_S2_BASE_URL = "https://api.semanticscholar.org/graph/v1"
+# ~1 request/second unauthenticated. An S2_API_KEY lifts this; override with
+# TREEXIV_S2_MIN_INTERVAL.
+DEFAULT_S2_MIN_INTERVAL = 1.1
+DEFAULT_S2_KEYED_MIN_INTERVAL = 0.1
+# A ceiling on how much of a run can be spent waiting on S2.
+DEFAULT_S2_REQUEST_BUDGET = 12
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -67,6 +82,16 @@ def _env_int(name: str, default: int) -> int:
 def _env_str(name: str, default: str) -> str:
     raw = os.getenv(name)
     return raw.strip() if raw and raw.strip() else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return default
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +122,11 @@ class Settings:
     curation_max_nodes: int = DEFAULT_CURATION_MAX_NODES
     curation_model: str | None = None
     narrative: bool = DEFAULT_NARRATIVE
+    source_mode: SourceMode = DEFAULT_SOURCE_MODE
+    s2_api_key: str | None = None
+    s2_base_url: str = DEFAULT_S2_BASE_URL
+    s2_min_interval: float = DEFAULT_S2_MIN_INTERVAL
+    s2_request_budget: int = DEFAULT_S2_REQUEST_BUDGET
 
     @property
     def resolved_curation_model(self) -> str:
@@ -113,9 +143,14 @@ class Settings:
         TREEXIV_BM25_TOP_K, TREEXIV_CACHE_DIR, OPENROUTER_API_KEY,
         OPENROUTER_BASE_URL, OPENROUTER_MODEL, TREEXIV_LLM_WEB_SEARCH,
         TREEXIV_CURATION, TREEXIV_CURATION_PREFILTER, TREEXIV_CURATION_MAX_NODES,
-        TREEXIV_CURATION_MODEL, TREEXIV_NARRATIVE.
+        TREEXIV_CURATION_MODEL, TREEXIV_NARRATIVE, TREEXIV_SOURCE, S2_API_KEY,
+        S2_BASE_URL, TREEXIV_S2_MIN_INTERVAL, TREEXIV_S2_REQUEST_BUDGET.
         """
         load_dotenv()
+        s2_key = os.getenv("S2_API_KEY") or None
+        default_interval = (
+            DEFAULT_S2_KEYED_MIN_INTERVAL if s2_key else DEFAULT_S2_MIN_INTERVAL
+        )
         return cls(
             api_key=os.getenv("OPENALEX_API_KEY") or None,
             mailto=os.getenv("OPENALEX_MAILTO") or None,
@@ -143,4 +178,9 @@ class Settings:
             ),
             curation_model=os.getenv("TREEXIV_CURATION_MODEL") or None,
             narrative=_env_bool("TREEXIV_NARRATIVE", DEFAULT_NARRATIVE),
+            source_mode=_env_str("TREEXIV_SOURCE", DEFAULT_SOURCE_MODE),  # type: ignore[arg-type]
+            s2_api_key=s2_key,
+            s2_base_url=_env_str("S2_BASE_URL", DEFAULT_S2_BASE_URL),
+            s2_min_interval=_env_float("TREEXIV_S2_MIN_INTERVAL", default_interval),
+            s2_request_budget=_env_int("TREEXIV_S2_REQUEST_BUDGET", DEFAULT_S2_REQUEST_BUDGET),
         )

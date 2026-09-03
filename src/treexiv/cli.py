@@ -29,10 +29,11 @@ from treexiv.config import Settings
 from treexiv.exceptions import TreeXivError
 from treexiv.expand import expand_two_hop
 from treexiv.filtering import build_graph
-from treexiv.models import ExpansionResult, FilteredGraph
+from treexiv.models import ExpansionResult, FilteredGraph, Work
 from treexiv.openalex import OpenAlexClient
 from treexiv.render import render_html
 from treexiv.seed_llm import identify_seed
+from treexiv.sources.enrich import enrich_expansion, find_seed
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -50,6 +51,7 @@ def _settings_from_options(
     curation: str | None = None,
     max_nodes: int | None = None,
     narrative: bool | None = None,
+    source: str | None = None,
 ) -> Settings:
     base = Settings.from_env()
     return dataclasses.replace(
@@ -62,6 +64,7 @@ def _settings_from_options(
         curation_mode=curation if curation is not None else base.curation_mode,  # type: ignore[arg-type]
         curation_max_nodes=max_nodes if max_nodes is not None else base.curation_max_nodes,
         narrative=narrative if narrative is not None else base.narrative,
+        source_mode=source if source is not None else base.source_mode,  # type: ignore[arg-type]
     )
 
 
@@ -92,6 +95,16 @@ _MAX_NODES_OPTION = click.option(
     type=int,
     default=None,
     help="Cap on papers LLM curation may keep (default 35). Ignored by --curation bm25.",
+)
+_SOURCE_OPTION = click.option(
+    "--source",
+    type=click.Choice(["auto", "s2", "openalex"]),
+    default=None,
+    help=(
+        "Where citation intents and seed matching come from: 'auto' (default) "
+        "uses Semantic Scholar for the seed and its direct citations and carries "
+        "on without it if S2 is rate-limited; 'openalex' skips S2 entirely."
+    ),
 )
 _NARRATIVE_OPTION = click.option(
     "--narrative/--no-narrative",
@@ -140,33 +153,70 @@ def identify_seed_cmd(description: str, model: str | None, web_search: bool | No
 @main.command("search-seed")
 @click.argument("query")
 @click.option("--limit", default=5, show_default=True, help="Number of candidates to return.")
-def search_seed(query: str, limit: int) -> None:
-    """Search OpenAlex for candidate seed works matching QUERY.
+@_SOURCE_OPTION
+def search_seed(query: str, limit: int, source: str | None) -> None:
+    """Find candidate seed works matching QUERY.
+
+    Semantic Scholar's title matcher runs first (it answers "which paper is
+    this?" far better than a relevance search does) and its match, resolved
+    into OpenAlex by DOI, is returned as the first candidate with
+    `matched_by: "semantic_scholar"`. OpenAlex relevance results follow.
 
     Prints a JSON array of candidates (id, title, year, authors, venue,
-    cited_by_count) to stdout. Resolving ambiguity between candidates
-    (including any external cross-check) is the caller's responsibility.
+    cited_by_count) to stdout. IDs are always OpenAlex work IDs, ready for
+    `run`. Resolving ambiguity between candidates (including any external
+    cross-check) is the caller's responsibility.
     """
-    settings = Settings.from_env()
+    settings = _settings_from_options(source=source)
+    candidates: list[dict] = []
+    seen: set[str] = set()
     with OpenAlexClient(settings) as client:
-        candidates = client.search_works(query, limit=limit)
-    click.echo(
-        json.dumps(
-            [
-                {
-                    "id": w.id,
-                    "title": w.title,
-                    "publication_year": w.publication_year,
-                    "cited_by_count": w.cited_by_count,
-                    "authors": w.authors,
-                    "venue": w.venue,
-                    "doi": w.doi,
-                }
-                for w in candidates
-            ],
-            indent=2,
-        )
-    )
+        if settings.source_mode != "openalex":
+            matched = _s2_candidate(query, settings, client)
+            if matched is not None:
+                candidates.append(matched)
+                seen.add(matched["id"])
+        for work in client.search_works(query, limit=limit):
+            if work.id in seen:
+                continue
+            candidates.append({**_candidate_dict(work), "matched_by": "openalex_search"})
+            seen.add(work.id)
+    click.echo(json.dumps(candidates, indent=2))
+
+
+def _candidate_dict(work: Work) -> dict:
+    return {
+        "id": work.id,
+        "title": work.title,
+        "publication_year": work.publication_year,
+        "cited_by_count": work.cited_by_count,
+        "authors": work.authors,
+        "venue": work.venue,
+        "doi": work.doi,
+    }
+
+
+def _s2_candidate(query: str, settings: Settings, client: OpenAlexClient) -> dict | None:
+    """S2's best title match for `query`, resolved into an OpenAlex work.
+
+    Returns None whenever S2 has no match, the match has no DOI, or OpenAlex
+    doesn't have that DOI — every one of which just means "no extra candidate",
+    since the OpenAlex search below still runs.
+    """
+    lookup = find_seed(query, settings)
+    if lookup is None:
+        return None
+    doi = lookup.work.normalized_doi
+    if not doi:
+        return None
+    try:
+        found = client.get_works_by_doi([doi])
+    except TreeXivError:
+        return None
+    work = found.get(doi)
+    if work is None:
+        return None
+    return {**_candidate_dict(work), "matched_by": "semantic_scholar"}
 
 
 @main.command("expand")
@@ -181,6 +231,7 @@ def search_seed(query: str, limit: int) -> None:
 )
 @click.option("--sample-seed", type=int, default=None, help="RNG seed for --sampling random.")
 @click.option("--cache-dir", default=None, help="Optional per-run JSON cache directory.")
+@_SOURCE_OPTION
 @click.option("--out", "out_path", required=True, type=click.Path(path_type=Path))
 def expand_cmd(
     work_id: str,
@@ -189,18 +240,26 @@ def expand_cmd(
     sampling: str | None,
     sample_seed: int | None,
     cache_dir: str | None,
+    source: str | None,
     out_path: Path,
 ) -> None:
     """Two-hop bidirectional expansion from WORK_ID (an OpenAlex work ID).
 
-    Writes the resulting node/edge set as JSON to --out.
+    Writes the resulting node/edge set as JSON to --out. Unless --source
+    openalex, the seed's own citations are then labelled with Semantic
+    Scholar's citation intents.
     """
-    settings = _settings_from_options(total_cap, fanout_cap, sampling, None, cache_dir)
+    settings = _settings_from_options(
+        total_cap, fanout_cap, sampling, None, cache_dir, source=source
+    )
     with OpenAlexClient(settings) as client:
         seed_work = client.get_work(work_id)
         cache = WorkCache(settings.cache_dir, seed_id=seed_work.id)
         result = expand_two_hop(client, settings, seed_work, cache=cache, sample_seed=sample_seed)
+        report = enrich_expansion(result, seed_work, client, settings, on_warning=_warn)
     _write_json(out_path, result.to_dict())
+    if report.attempted:
+        click.echo(report.summary(), err=True)
     click.echo(
         f"Expanded {seed_work.title!r}: {len(result.nodes)} nodes, {len(result.edges)} edges"
         f"{' (truncated by cap)' if result.truncated else ''} -> {out_path}",
@@ -262,6 +321,7 @@ def render_cmd(filtered_json: Path, out_path: Path, title: str) -> None:
 @_CURATION_OPTION
 @_MAX_NODES_OPTION
 @_NARRATIVE_OPTION
+@_SOURCE_OPTION
 @click.option("--cache-dir", default=None)
 @click.option(
     "--out-json", required=True, type=click.Path(path_type=Path), help="Filtered graph JSON output."
@@ -292,6 +352,7 @@ def run_cmd(
     curation: str | None,
     max_nodes: int | None,
     narrative: bool | None,
+    source: str | None,
     cache_dir: str | None,
     out_json: Path,
     out_expansion: Path | None,
@@ -305,7 +366,7 @@ def run_cmd(
     judgment.
     """
     settings = _settings_from_options(
-        total_cap, fanout_cap, sampling, top_k, cache_dir, curation, max_nodes, narrative
+        total_cap, fanout_cap, sampling, top_k, cache_dir, curation, max_nodes, narrative, source
     )
     with OpenAlexClient(settings) as client:
         seed_work = client.get_work(work_id)
@@ -313,6 +374,7 @@ def run_cmd(
         expansion = expand_two_hop(
             client, settings, seed_work, cache=cache, sample_seed=sample_seed
         )
+        report = enrich_expansion(expansion, seed_work, client, settings, on_warning=_warn)
     filtered = build_graph(expansion, idea, settings, on_warning=_warn)
 
     expansion_path = out_expansion or out_json.with_name(out_json.stem + ".expansion.json")
@@ -322,6 +384,7 @@ def run_cmd(
     click.echo(
         f"{seed_work.title!r}: {len(expansion.nodes)} expanded -> {_describe_graph(filtered)}"
         f"{' (expansion truncated by cap)' if expansion.truncated else ''}\n"
+        f"{chr(10) + report.summary() if report.attempted else ''}\n"
         f"Full expansion JSON: {expansion_path}\nFiltered JSON: {out_json}\nHTML: {written}",
         err=True,
     )

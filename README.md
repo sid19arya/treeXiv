@@ -131,10 +131,15 @@ the session. Free-tier services spin down after 15 minutes idle and take
    a title / arXiv ID and a query string. It's a lead, not a resolution —
    step 1 still runs.
 1. **Resolve** — your seed reference (title, DOI, or arXiv ID) is matched to
-   one OpenAlex work.
+   one OpenAlex work. Semantic Scholar's title matcher goes first, because it
+   answers "which paper is this?" far better than a relevance search does; its
+   match is resolved into OpenAlex by DOI and offered as the top candidate.
 2. **Expand** — a two-hop traversal in both directions: papers your seed
    cites, papers that cite your seed, and one hop further out from each of
-   those, capped so it stays fast and the graph stays readable.
+   those, capped so it stays fast and the graph stays readable. Semantic
+   Scholar is then asked what the seed's *own* citations were for — background,
+   methodology, or result, and whether it considers them influential — and
+   those labels are attached to the matching edges.
 3. **Curate** — BM25 narrows the collected papers to a shortlist, then an
    LLM reads that shortlist and decides which papers are actually load-bearing
    for the idea you described, grouping the survivors into a handful of named
@@ -180,6 +185,10 @@ handful of requests:
 |---|---|
 | `OPENALEX_API_KEY` | Recommended — avoids aggressive rate limiting |
 | `OPENALEX_MAILTO` | Email for OpenAlex's polite-pool header |
+| `S2_API_KEY` | Optional. Semantic Scholar works without one; a key just lifts the throttle |
+| `TREEXIV_SOURCE` | `auto` (default) uses S2 for seed matching and citation intents; `openalex` skips S2 entirely |
+| `TREEXIV_S2_MIN_INTERVAL` | Seconds between S2 requests (default 1.1 unauthenticated, 0.1 with a key) |
+| `TREEXIV_S2_REQUEST_BUDGET` | Ceiling on S2 requests per run (default 12) |
 | `OPENROUTER_API_KEY` | Required for `identify-seed` (Step 0) and for LLM curation; without it, curation falls back to BM25 |
 | `OPENROUTER_MODEL` | Model slug for the LLM steps (default `z-ai/glm-5.3-flash`) |
 | `TREEXIV_CURATION` | `auto` (default: curate when a key exists, else BM25), `llm` (require curation), or `bm25` (never call an LLM) |
@@ -198,6 +207,22 @@ handful of requests:
 
 TreeXiv is deliberately simple: no database, no embeddings, no background
 jobs. Every run is a fresh, disposable query against live OpenAlex data.
+
+Two sources, each doing what it's good at. OpenAlex has no key gate and no
+meaningful rate limit, so it does the bulk two-hop crawl and owns the graph's
+IDs. Semantic Scholar knows two things OpenAlex doesn't — *why* one paper cites
+another, and plain-text abstracts — but unauthenticated S2 shares a rate-limit
+pool that 429s after a couple of back-to-back requests, so it's asked only
+about the seed paper and its direct citations, where those two things pay off
+most. The join between them is by DOI, the one identifier both agree on;
+papers that don't match are left unlabelled rather than guessed at, and an
+S2 outage costs you the labels, not the run.
+
+Intent coverage is uneven, and worth knowing about: S2 classifies a citation
+by reading the citing paper's full text, so well-indexed published work comes
+back richly labelled while recent arXiv preprints often return no intents at
+all. An unlabelled edge means "not checked", never "incidental" — nothing in
+the pipeline treats a missing intent as evidence against a paper.
 
 Retrieval is still lexical — BM25 over titles and abstracts — so a paper that
 shares no vocabulary with your stated idea won't be collected in the first
