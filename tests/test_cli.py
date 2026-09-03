@@ -240,3 +240,104 @@ def test_run_command_respects_explicit_out_expansion(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert custom_path.exists()
     assert not (tmp_path / "filtered.expansion.json").exists()
+
+
+@respx.mock
+def test_run_command_curates_when_a_key_is_configured(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    seed_payload = make_work_payload("W1", "Seed", referenced_works=["R1"])
+    respx.get("https://api.openalex.org/works/W1").mock(
+        return_value=httpx.Response(200, json=seed_payload)
+    )
+    respx.get("https://api.openalex.org/works").mock(
+        return_value=httpx.Response(
+            200, json={"results": [make_work_payload("R1", "Reference", cited_by_count=2)]}
+        )
+    )
+    curation = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "clusters": [
+                                {"id": 1, "name": "Roots", "role": "ancestor", "summary": "s"}
+                            ],
+                            "keep": [
+                                {"i": 1, "cluster": 1, "importance": 5, "why": "the origin"}
+                            ],
+                            "dropped_summary": "cut the noise",
+                        }
+                    )
+                }
+            }
+        ]
+    }
+    chat = respx.post("https://openrouter.ai/api/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=curation)
+    )
+    out_json = tmp_path / "filtered.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "run", "W1", "--idea", "reference",
+            "--out-json", str(out_json),
+            "--out-html", str(tmp_path / "tree.html"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert chat.called
+    payload = json.loads(out_json.read_text(encoding="utf-8"))
+    assert payload["curation"] == "llm"
+    assert payload["clusters"][0]["name"] == "Roots"
+    assert payload["curation_notes"] == "cut the noise"
+
+
+@respx.mock
+def test_run_command_curation_bm25_skips_the_llm(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    respx.get("https://api.openalex.org/works/W1").mock(
+        return_value=httpx.Response(200, json=make_work_payload("W1", "Seed"))
+    )
+    respx.get("https://api.openalex.org/works").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    out_json = tmp_path / "filtered.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "run", "W1", "--idea", "reference", "--curation", "bm25",
+            "--out-json", str(out_json),
+            "--out-html", str(tmp_path / "tree.html"),
+        ],
+    )
+    # No OpenRouter route is mocked, so any LLM call would fail the run.
+    assert result.exit_code == 0, result.output
+    assert json.loads(out_json.read_text(encoding="utf-8"))["curation"] == "bm25"
+
+
+@respx.mock
+def test_filter_command_falls_back_to_bm25_without_a_key(tmp_path) -> None:
+    expansion = ExpansionResult(
+        seed_id="W1",
+        nodes={
+            "W1": Node(id="W1", title="Seed", publication_year=2020, cited_by_count=0,
+                       authors=[], venue=None, abstract="", hop=0),
+            "W2": Node(id="W2", title="Recursive models", publication_year=2021,
+                       cited_by_count=1, authors=[], venue=None, abstract="recursion", hop=1),
+        },
+        edges=[Edge("W2", "W1")],
+    )
+    expansion_path = tmp_path / "expansion.json"
+    expansion_path.write_text(json.dumps(expansion.to_dict()), encoding="utf-8")
+    out_json = tmp_path / "filtered.json"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["filter", str(expansion_path), "--idea", "recursion", "--out", str(out_json)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "OPENROUTER_API_KEY unset" in result.output
+    assert json.loads(out_json.read_text(encoding="utf-8"))["curation"] == "bm25"

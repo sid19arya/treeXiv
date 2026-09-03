@@ -28,7 +28,7 @@ from treexiv.cache import WorkCache
 from treexiv.config import Settings
 from treexiv.exceptions import TreeXivError
 from treexiv.expand import expand_two_hop
-from treexiv.filtering import filter_by_idea
+from treexiv.filtering import build_graph
 from treexiv.models import ExpansionResult, FilteredGraph
 from treexiv.openalex import OpenAlexClient
 from treexiv.render import render_html
@@ -42,11 +42,13 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _settings_from_options(
-    total_cap: int | None,
-    fanout_cap: int | None,
-    sampling: str | None,
-    top_k: int | None,
-    cache_dir: str | None,
+    total_cap: int | None = None,
+    fanout_cap: int | None = None,
+    sampling: str | None = None,
+    top_k: int | None = None,
+    cache_dir: str | None = None,
+    curation: str | None = None,
+    max_nodes: int | None = None,
 ) -> Settings:
     base = Settings.from_env()
     return dataclasses.replace(
@@ -56,7 +58,38 @@ def _settings_from_options(
         sampling_strategy=sampling if sampling is not None else base.sampling_strategy,  # type: ignore[arg-type]
         bm25_top_k=top_k if top_k is not None else base.bm25_top_k,
         cache_dir=cache_dir if cache_dir is not None else base.cache_dir,
+        curation_mode=curation if curation is not None else base.curation_mode,  # type: ignore[arg-type]
+        curation_max_nodes=max_nodes if max_nodes is not None else base.curation_max_nodes,
     )
+
+
+def _warn(message: str) -> None:
+    click.echo(f"warning: {message}", err=True)
+
+
+def _describe_graph(graph: FilteredGraph) -> str:
+    """One-line summary of what filtering produced, for stderr."""
+    how = "LLM-curated" if graph.curation == "llm" else "BM25 top-K"
+    clusters = f", {len(graph.clusters)} concept clusters" if graph.clusters else ""
+    return f"{how}: {len(graph.nodes)} nodes, {len(graph.edges)} edges{clusters}"
+
+
+_CURATION_OPTION = click.option(
+    "--curation",
+    type=click.Choice(["auto", "llm", "bm25"]),
+    default=None,
+    help=(
+        "How to pick which papers survive: 'llm' curates and clusters them "
+        "(needs OPENROUTER_API_KEY), 'bm25' uses the deterministic top-K filter, "
+        "'auto' (default) curates when a key is available and falls back to BM25."
+    ),
+)
+_MAX_NODES_OPTION = click.option(
+    "--max-nodes",
+    type=int,
+    default=None,
+    help="Cap on papers LLM curation may keep (default 35). Ignored by --curation bm25.",
+)
 
 
 @click.group()
@@ -167,21 +200,29 @@ def expand_cmd(
 @main.command("filter")
 @click.argument("expansion_json", type=click.Path(exists=True, path_type=Path))
 @click.option("--idea", required=True, help="Free-text description of the core idea to filter by.")
-@click.option("--top-k", type=int, default=None, help="Number of nodes to keep (default 40).")
+@click.option("--top-k", type=int, default=None, help="BM25 nodes to keep (default 40).")
+@_CURATION_OPTION
+@_MAX_NODES_OPTION
 @click.option("--out", "out_path", required=True, type=click.Path(path_type=Path))
-def filter_cmd(expansion_json: Path, idea: str, top_k: int | None, out_path: Path) -> None:
-    """BM25-filter an expansion (from `expand`) against --idea.
+def filter_cmd(
+    expansion_json: Path,
+    idea: str,
+    top_k: int | None,
+    curation: str | None,
+    max_nodes: int | None,
+    out_path: Path,
+) -> None:
+    """Filter an expansion (from `expand`) down to the papers worth showing.
 
-    Writes the filtered node/edge set as JSON to --out.
+    By default an LLM curates the set and groups it into concept clusters;
+    `--curation bm25` keeps the older deterministic top-K behaviour. Writes the
+    filtered node/edge set as JSON to --out.
     """
-    settings = _settings_from_options(None, None, None, top_k, None)
+    settings = _settings_from_options(top_k=top_k, curation=curation, max_nodes=max_nodes)
     expansion = ExpansionResult.from_dict(json.loads(expansion_json.read_text(encoding="utf-8")))
-    filtered = filter_by_idea(expansion, idea, top_k=settings.bm25_top_k)
+    filtered = build_graph(expansion, idea, settings, on_warning=_warn)
     _write_json(out_path, filtered.to_dict())
-    click.echo(
-        f"Filtered to {len(filtered.nodes)} nodes, {len(filtered.edges)} edges -> {out_path}",
-        err=True,
-    )
+    click.echo(f"{_describe_graph(filtered)} -> {out_path}", err=True)
 
 
 @main.command("render")
@@ -203,6 +244,8 @@ def render_cmd(filtered_json: Path, out_path: Path, title: str) -> None:
 @click.option("--sampling", type=click.Choice(["top_cited", "random"]), default=None)
 @click.option("--sample-seed", type=int, default=None)
 @click.option("--top-k", type=int, default=None)
+@_CURATION_OPTION
+@_MAX_NODES_OPTION
 @click.option("--cache-dir", default=None)
 @click.option(
     "--out-json", required=True, type=click.Path(path_type=Path), help="Filtered graph JSON output."
@@ -230,6 +273,8 @@ def run_cmd(
     sampling: str | None,
     sample_seed: int | None,
     top_k: int | None,
+    curation: str | None,
+    max_nodes: int | None,
     cache_dir: str | None,
     out_json: Path,
     out_expansion: Path | None,
@@ -242,21 +287,23 @@ def run_cmd(
     happened upstream, e.g. via `search-seed` plus the calling agent's own
     judgment.
     """
-    settings = _settings_from_options(total_cap, fanout_cap, sampling, top_k, cache_dir)
+    settings = _settings_from_options(
+        total_cap, fanout_cap, sampling, top_k, cache_dir, curation, max_nodes
+    )
     with OpenAlexClient(settings) as client:
         seed_work = client.get_work(work_id)
         cache = WorkCache(settings.cache_dir, seed_id=seed_work.id)
         expansion = expand_two_hop(
             client, settings, seed_work, cache=cache, sample_seed=sample_seed
         )
-    filtered = filter_by_idea(expansion, idea, top_k=settings.bm25_top_k)
+    filtered = build_graph(expansion, idea, settings, on_warning=_warn)
 
     expansion_path = out_expansion or out_json.with_name(out_json.stem + ".expansion.json")
     _write_json(expansion_path, expansion.to_dict())
     _write_json(out_json, filtered.to_dict())
     written = render_html(filtered, out_html, title=title)
     click.echo(
-        f"{seed_work.title!r}: {len(expansion.nodes)} expanded -> {len(filtered.nodes)} filtered"
+        f"{seed_work.title!r}: {len(expansion.nodes)} expanded -> {_describe_graph(filtered)}"
         f"{' (expansion truncated by cap)' if expansion.truncated else ''}\n"
         f"Full expansion JSON: {expansion_path}\nFiltered JSON: {out_json}\nHTML: {written}",
         err=True,

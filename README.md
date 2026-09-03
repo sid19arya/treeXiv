@@ -81,6 +81,10 @@ uv run treexiv identify-seed "the 2017 paper that introduced the transformer" \
 command only talks to OpenAlex. Web-search grounding is on by default
 (`--no-web` to disable, or `--model` to override `OPENROUTER_MODEL`).
 
+Curation runs automatically when `OPENROUTER_API_KEY` is set. To pin the
+behaviour explicitly, pass `--curation llm|bm25|auto` (and `--max-nodes N` to
+change how many papers curation may keep) to `run` or `filter`.
+
 Run `uv run treexiv --help` for the full command list (`identify-seed`,
 `search-seed`, `expand`, `filter`, `render`, `run`).
 
@@ -130,9 +134,13 @@ the session. Free-tier services spin down after 15 minutes idle and take
 2. **Expand** — a two-hop traversal in both directions: papers your seed
    cites, papers that cite your seed, and one hop further out from each of
    those, capped so it stays fast and the graph stays readable.
-3. **Filter** — every collected paper is scored with BM25 against the idea
-   you described, and only the most relevant ones make the cut (your seed
-   paper is always kept, regardless of score).
+3. **Curate** — BM25 narrows the collected papers to a shortlist, then an
+   LLM reads that shortlist and decides which papers are actually load-bearing
+   for the idea you described, grouping the survivors into a handful of named
+   concept clusters and saying in one line why each one earned its place.
+   Your seed paper is always kept. Without `OPENROUTER_API_KEY` — or with
+   `--curation bm25` — this falls back to the older behaviour: keep the top-K
+   papers by BM25 score and nothing else.
 4. **Render** — the result becomes a single self-contained HTML file: no
    server, nothing to host, just open it.
 
@@ -164,25 +172,32 @@ handful of requests:
 |---|---|
 | `OPENALEX_API_KEY` | Recommended — avoids aggressive rate limiting |
 | `OPENALEX_MAILTO` | Email for OpenAlex's polite-pool header |
-| `OPENROUTER_API_KEY` | Required for `identify-seed` (Step 0) only; nothing else uses it |
-| `OPENROUTER_MODEL` | Model slug for Step 0 (default `z-ai/glm-5.3-flash`) |
+| `OPENROUTER_API_KEY` | Required for `identify-seed` (Step 0) and for LLM curation; without it, curation falls back to BM25 |
+| `OPENROUTER_MODEL` | Model slug for the LLM steps (default `z-ai/glm-5.3-flash`) |
+| `TREEXIV_CURATION` | `auto` (default: curate when a key exists, else BM25), `llm` (require curation), or `bm25` (never call an LLM) |
+| `TREEXIV_CURATION_MAX_NODES` | Cap on papers curation may keep (default 35) |
+| `TREEXIV_CURATION_PREFILTER` | How many BM25-ranked papers curation reads (default 120) |
+| `TREEXIV_CURATION_MODEL` | Model slug for curation only, if it should differ from `OPENROUTER_MODEL` |
 | `TREEXIV_LLM_WEB_SEARCH` | `true` (default) grounds Step 0 in a web search; `false` disables it |
 | `TREEXIV_TOTAL_CORPUS_CAP` | Global cap on papers collected (default 500) |
 | `TREEXIV_FANOUT_CAP` | Per-paper cap on references/citations followed (default 100) |
-| `TREEXIV_BM25_TOP_K` | How many papers survive relevance filtering (default 40) |
+| `TREEXIV_BM25_TOP_K` | How many papers survive the BM25 fallback filter (default 40) |
 | `TREEXIV_SAMPLING_STRATEGY` | `top_cited` (default, favors established papers) or `random` (favors catching less-cited, divergent branches) |
 | `TREEXIV_CACHE_DIR` | If set, caches fetched papers per seed so repeat runs don't re-hit the API |
 
 ## Design notes
 
 TreeXiv is deliberately simple: no database, no embeddings, no background
-jobs. Every run is a fresh, disposable query against live OpenAlex data,
-filtered with BM25 rather than a semantic model. The one LLM touchpoint is
-the optional `identify-seed` step, and it only runs when you invoke it. That's a real tradeoff —
-it won't catch a relevant paper that shares no vocabulary with your stated
-idea, and citation coverage varies by field and publisher — but it means
-there's nothing to maintain, nothing to go stale, and a result in seconds
-rather than a pipeline to operate.
+jobs. Every run is a fresh, disposable query against live OpenAlex data.
+
+Retrieval is still lexical — BM25 over titles and abstracts — so a paper that
+shares no vocabulary with your stated idea won't be collected in the first
+place, and citation coverage varies by field and publisher. What BM25 no
+longer does is decide what you see: it hands a shortlist to an LLM, which
+judges lineage rather than word overlap. That's where the graph goes from
+"forty papers that mention your keywords" to "the dozen or so that tell the
+story." Every LLM step degrades to a deterministic fallback if the key is
+missing or the call fails, so a run never depends on it.
 
 ## License
 

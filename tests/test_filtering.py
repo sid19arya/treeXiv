@@ -1,4 +1,17 @@
-from treexiv.filtering import filter_by_idea
+"""Tests for Step 4: the deterministic BM25 filter and the `build_graph`
+entry point that chooses between it and the LLM curation path."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+
+import httpx
+import pytest
+import respx
+
+from treexiv.exceptions import CurationError
+from treexiv.filtering import build_graph, filter_by_idea
 from treexiv.models import Edge, ExpansionResult, Node
 
 
@@ -64,3 +77,80 @@ def test_top_k_larger_than_corpus_keeps_everything() -> None:
     expansion = ExpansionResult(seed_id="SEED", nodes={"SEED": seed, "W1": other}, edges=[])
     filtered = filter_by_idea(expansion, "seed", top_k=100)
     assert len(filtered.nodes) == 2
+
+
+# --- build_graph: which of the two Step 4 paths actually runs -----------------
+
+_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+_CURATION_REPLY = {
+    "choices": [
+        {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "clusters": [
+                            {"id": 1, "name": "Foundations", "role": "ancestor", "summary": "s"}
+                        ],
+                        "keep": [{"i": 1, "cluster": 1, "importance": 5, "why": "central"}],
+                    }
+                )
+            }
+        }
+    ]
+}
+
+
+@pytest.fixture
+def two_node_expansion():
+    seed = _node("SEED", "Recursive language models")
+    other = _node("W1", "Recursive language models extension")
+    return ExpansionResult(
+        seed_id="SEED", nodes={"SEED": seed, "W1": other}, edges=[Edge("W1", "SEED")]
+    )
+
+
+def test_build_graph_bm25_mode_never_calls_the_llm(settings, two_node_expansion) -> None:
+    keyed = dataclasses.replace(settings, curation_mode="bm25", openrouter_api_key="sk-or-test")
+    # respx isn't active here: any HTTP call at all would raise.
+    graph = build_graph(two_node_expansion, "recursive language models", keyed)
+    assert graph.curation == "bm25"
+    assert graph.clusters == []
+
+
+def test_build_graph_auto_falls_back_to_bm25_without_a_key(settings, two_node_expansion) -> None:
+    keyless = dataclasses.replace(settings, curation_mode="auto", openrouter_api_key=None)
+    warnings: list[str] = []
+    graph = build_graph(
+        two_node_expansion, "recursive language models", keyless, on_warning=warnings.append
+    )
+    assert graph.curation == "bm25"
+    assert "OPENROUTER_API_KEY" in warnings[0]
+
+
+@respx.mock
+def test_build_graph_auto_curates_when_a_key_is_available(settings, two_node_expansion) -> None:
+    keyed = dataclasses.replace(settings, curation_mode="auto", openrouter_api_key="sk-or-test")
+    respx.post(_CHAT_URL).mock(return_value=httpx.Response(200, json=_CURATION_REPLY))
+    graph = build_graph(two_node_expansion, "recursive language models", keyed)
+    assert graph.curation == "llm"
+    assert [c.name for c in graph.clusters] == ["Foundations"]
+
+
+@respx.mock
+def test_build_graph_auto_falls_back_when_curation_fails(settings, two_node_expansion) -> None:
+    keyed = dataclasses.replace(settings, curation_mode="auto", openrouter_api_key="sk-or-test")
+    respx.post(_CHAT_URL).mock(return_value=httpx.Response(500))
+    warnings: list[str] = []
+    graph = build_graph(
+        two_node_expansion, "recursive language models", keyed, on_warning=warnings.append
+    )
+    assert graph.curation == "bm25"
+    assert "falling back" in warnings[0]
+
+
+@respx.mock
+def test_build_graph_llm_mode_surfaces_the_failure(settings, two_node_expansion) -> None:
+    keyed = dataclasses.replace(settings, curation_mode="llm", openrouter_api_key="sk-or-test")
+    respx.post(_CHAT_URL).mock(return_value=httpx.Response(500))
+    with pytest.raises(CurationError):
+        build_graph(two_node_expansion, "recursive language models", keyed)

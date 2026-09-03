@@ -173,38 +173,103 @@ class ExpansionResult:
         )
 
 
+@dataclass(slots=True, frozen=True)
+class Cluster:
+    """A named group of papers that play the same role in the lineage.
+
+    Produced by the Step 4 LLM curation pass (`curate.py`); empty when the run
+    used the deterministic BM25 path instead. `role` says where the cluster
+    sits relative to the seed — "ancestor" (work the seed grew out of),
+    "descendant" (work that grew out of the seed), or "contemporary".
+    """
+
+    id: str
+    name: str
+    summary: str = ""
+    role: str = "contemporary"
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name, "summary": self.summary, "role": self.role}
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> Cluster:
+        return cls(
+            id=payload["id"],
+            name=payload.get("name", payload["id"]),
+            summary=payload.get("summary", ""),
+            role=payload.get("role", "contemporary"),
+        )
+
+
+# Keys `ScoredNode.to_dict` adds on top of the plain `Node` payload, so
+# `from_dict` knows which ones not to hand to `Node.from_dict`.
+_SCORED_ONLY_KEYS = frozenset({"bm25_score", "cluster_id", "importance", "why"})
+
+
 @dataclass(slots=True)
 class ScoredNode:
-    """A `Node` annotated with its BM25 relevance score against the core-idea query."""
+    """A `Node` annotated with why it survived filtering.
+
+    `score` is always the BM25 relevance score against the core-idea query.
+    The remaining fields are only populated on an LLM-curated run: which
+    `Cluster` the paper belongs to, how central the model judged it (1-5), and
+    a one-line reason it earned its place in the tree.
+    """
 
     node: Node
     score: float
+    cluster_id: str | None = None
+    importance: int | None = None
+    why: str = ""
 
     def to_dict(self) -> dict:
-        return {**self.node.to_dict(), "bm25_score": self.score}
+        return {
+            **self.node.to_dict(),
+            "bm25_score": self.score,
+            "cluster_id": self.cluster_id,
+            "importance": self.importance,
+            "why": self.why,
+        }
 
     @classmethod
     def from_dict(cls, payload: dict) -> ScoredNode:
-        node_fields = {k: v for k, v in payload.items() if k != "bm25_score"}
-        return cls(node=Node.from_dict(node_fields), score=payload.get("bm25_score", 0.0))
+        node_fields = {k: v for k, v in payload.items() if k not in _SCORED_ONLY_KEYS}
+        return cls(
+            node=Node.from_dict(node_fields),
+            score=payload.get("bm25_score", 0.0),
+            cluster_id=payload.get("cluster_id"),
+            importance=payload.get("importance"),
+            why=payload.get("why", ""),
+        )
 
 
 @dataclass(slots=True)
 class FilteredGraph:
-    """Output of Step 4 (BM25 relevance filter): the surviving nodes, scored,
-    and only the edges whose endpoints both survived."""
+    """Output of Step 4: the surviving nodes and the edges between them.
+
+    Two paths produce this shape. `curation="bm25"` is the deterministic
+    top-K-by-BM25 filter (`filtering.py`), which leaves `clusters` empty.
+    `curation="llm"` is the LLM curation pass (`curate.py`), which picks
+    fewer, more deliberate papers and groups them into `clusters`.
+    """
 
     seed_id: str
     idea_text: str
     top_k: int
     nodes: list[ScoredNode]
     edges: list[Edge]
+    clusters: list[Cluster] = field(default_factory=list)
+    curation: str = "bm25"
+    curation_notes: str = ""
 
     def to_dict(self) -> dict:
         return {
             "seed_id": self.seed_id,
             "idea_text": self.idea_text,
             "top_k": self.top_k,
+            "curation": self.curation,
+            "curation_notes": self.curation_notes,
+            "clusters": [c.to_dict() for c in self.clusters],
             "nodes": [n.to_dict() for n in self.nodes],
             "edges": [e.to_dict() for e in self.edges],
         }
@@ -217,4 +282,7 @@ class FilteredGraph:
             top_k=payload["top_k"],
             nodes=[ScoredNode.from_dict(n) for n in payload["nodes"]],
             edges=[Edge.from_dict(e) for e in payload["edges"]],
+            clusters=[Cluster.from_dict(c) for c in payload.get("clusters", [])],
+            curation=payload.get("curation", "bm25"),
+            curation_notes=payload.get("curation_notes", ""),
         )

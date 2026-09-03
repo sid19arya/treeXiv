@@ -81,6 +81,19 @@ def _node_payload(
     }
 
 
+def _stats_text(graph: FilteredGraph, edge_payloads: list[dict]) -> str:
+    """The one-line summary under the title, naming how the set was chosen.
+
+    Worth being explicit: "top-40 by BM25" and "35 papers an LLM judged
+    load-bearing" are very different claims about what the reader is looking at.
+    """
+    base = f"{len(graph.nodes)} papers shown · {len(edge_payloads)} citation edges · "
+    if graph.curation == "llm":
+        clusters = f" across {len(graph.clusters)} concept clusters" if graph.clusters else ""
+        return base + f"selected as the lineage of the stated idea{clusters}"
+    return base + f"top-{graph.top_k} by keyword relevance to the stated idea"
+
+
 def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXiv Lineage") -> Path:
     """Write `graph` to `out_path` as an interactive, self-contained HTML file.
 
@@ -119,13 +132,7 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
     html = html.replace("__IDEA_TEXT__", _escape_for_inline_script(json.dumps(graph.idea_text)))
     html = html.replace("__SEED_ID__", _escape_for_inline_script(json.dumps(graph.seed_id)))
     html = html.replace(
-        "__STATS_TEXT__",
-        _escape_for_inline_script(
-            json.dumps(
-                f"{len(node_payloads)} papers shown · {len(edge_payloads)} citation edges "
-                f"· top-{graph.top_k} by relevance to the stated idea"
-            )
-        ),
+        "__STATS_TEXT__", _escape_for_inline_script(json.dumps(_stats_text(graph, edge_payloads)))
     )
     html = html.replace(
         "__SEED_LABEL__",
