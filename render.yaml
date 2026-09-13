@@ -22,7 +22,9 @@ services:
     buildCommand: "uv sync --frozen --no-dev --extra web"
     startCommand: "uv run --no-sync uvicorn treexiv.web:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /health
-    autoDeployTrigger: commit
+    # Deploys come from .github/workflows/ci.yml (tests first, then the
+    # service's deploy hook), not from Render watching the branch.
+    autoDeployTrigger: "off"
     envVars:
       - key: UV_VERSION
         value: "0.11.24"

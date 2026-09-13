@@ -1,0 +1,59 @@
+# Tests on every PR; on a push to main, tests and then a Render deploy.
+#
+# Render's own auto-deploy is off (render.yaml `autoDeployTrigger: off`) — the
+# service isn't linked to this repo through Render's GitHub App, so pushes never
+# reached it. The deploy job below is the only thing that ships main, and it
+# only runs once `test` has passed on that exact commit.
+#
+# Needs one repo secret: RENDER_DEPLOY_HOOK_URL (Render dashboard → the service
+# → Settings → Deploy Hook). The tests need none — tests/conftest.py blanks
+# every API key so the suite never touches the network.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.24"  # keep in step with UV_VERSION in render.yaml
+      # --extra web: tests/test_web.py imports FastAPI.
+      - run: uv sync --frozen --extra web
+      - run: uv run ruff check .
+      - run: uv run pytest
+
+  deploy:
+    name: deploy
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Two quick merges queue their deploys instead of racing; never cancel one
+    # mid-flight.
+    concurrency:
+      group: render-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Trigger Render deploy
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::RENDER_DEPLOY_HOOK_URL secret is not set — nothing was deployed."
+            exit 1
+          fi
+          # Render deploys the branch's latest commit, which is this one unless
+          # another push has landed since.
+          curl --fail --silent --show-error -X POST "$HOOK"
