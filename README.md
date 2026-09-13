@@ -132,6 +132,14 @@ First load prompts for the username/password once; the browser caches it for
 the session. Free-tier services spin down after 15 minutes idle and take
 ~1 minute to wake on the next request.
 
+Redeploys are driven by GitHub Actions, not by Render watching the branch:
+`.github/workflows/ci.yml` runs ruff and the test suite on every PR, and on
+every push to `main` it runs them again and, if they pass, calls the service's
+deploy hook. Copy the hook URL from the Render dashboard (the service →
+**Settings → Deploy Hook**) into a repo secret named `RENDER_DEPLOY_HOOK_URL`.
+Resuming a suspended service brings back its last deploy, not the latest
+commit — re-run the workflow (or deploy by hand) after resuming.
+
 ## How it works
 
 0. **Identify** *(optional)* — if you only have a description, not a paper, a
