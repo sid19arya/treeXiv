@@ -128,9 +128,11 @@ re-run only `filter` + `render` against it.
 - Name the seed paper that was actually resolved (title/year) so they can
   catch a bad Step-2 resolution.
 - Send the rendered HTML to the user as a file attachment — it's a
-  self-contained interactive graph. Mention that it opens on the concept
-  strands and that clicking one expands it into its papers, since that isn't
-  obvious from a static preview.
+  self-contained interactive graph. If curation ran, mention that it opens on
+  the concept strands and that clicking one expands it into its papers, since
+  that isn't obvious from a static preview. A BM25-fallback run has no
+  clusters and renders flat — every paper at once — so don't describe the
+  strand view for one.
 - Mention the full-expansion JSON path if they might want to dig into what got
   filtered out; it's not usually worth sending as its own attachment.
 
