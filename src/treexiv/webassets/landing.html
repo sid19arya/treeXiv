@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TreeXiv</title>
+<meta name="description" content="Trace where a research idea came from, and what it grew into.">
+<link rel="stylesheet" href="/site.css">
+</head>
+<body>
+<div class="page">
+  <header class="top">
+    <a class="wordmark" href="/">TreeXiv</a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="/example">Example</a>
+      <a href="https://github.com/sid19arya/treeXiv">GitHub</a>
+      <a href="/login">Sign in</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Trace where an idea came from, and what it grew into.</h1>
+
+    <p>A citation graph tells you <em>that</em> two papers are connected. TreeXiv
+      tries to tell you <em>why</em>. Give it one paper and a sentence about the idea
+      you care about. It follows the citations backward to the work that idea was
+      built on and forward to the work that took it somewhere. It keeps only the
+      papers that carry the idea, groups them into a handful of strands, and writes
+      a short account of how the idea developed.</p>
+
+    <h2 id="how">How it works</h2>
+    <ol>
+      <li><strong>Find the paper.</strong> Search by title, DOI, or arXiv ID, or
+        describe the paper and let a model with web search suggest a match. You
+        confirm which paper you meant.</li>
+      <li><strong>Walk the citations.</strong> Two hops in each direction: what the
+        paper cites and what those cite, and what cites it and what cites those.</li>
+      <li><strong>Shortlist.</strong> A keyword pass over titles and abstracts narrows
+        several hundred papers to the ones worth reading closely.</li>
+      <li><strong>Curate.</strong> A language model reads the shortlist against your
+        stated idea. It keeps the papers that carry the idea, groups them into three
+        to seven strands with a reason for each, and writes the lineage. It is never
+        asked who cites whom: every connection in the tree comes from the citation
+        data.</li>
+      <li><strong>Read the tree.</strong> An interactive graph laid out by year, with
+        the oldest work at the top left. It opens on the strands; click one to see
+        its papers.</li>
+    </ol>
+
+    <h2 id="example">Example</h2>
+    <p><em>Attention Is All You Need</em> (Vaswani et al., 2017), traced for the idea
+      of replacing recurrence and convolution with self-attention. Five hundred
+      papers were collected; seventeen were kept. The written lineage opens:</p>
+    <blockquote class="muted">Attention went from a patch on recurrent seq2seq to a
+      full replacement for recurrence and convolution, and then became the
+      universal sequence substrate for text, images, graphs, and proteins.</blockquote>
+    <ul class="strands">
+      <li><span class="role">Ancestor</span>Attention-based seq2seq precursors</li>
+      <li><span class="role">Descendant</span>Scaling Transformers into LLMs</li>
+      <li><span class="role">Descendant</span>Self-attention in vision</li>
+      <li><span class="role">Descendant</span>Transformer beyond language</li>
+    </ul>
+    <p><a href="/example">Open the example tree &rarr;</a></p>
+    <p class="muted small">OpenAlex lists this paper as 2025; the example corrects
+      it to 2017.</p>
+
+    <h2>Data</h2>
+    <p>Papers and the citation graph come from
+      <a href="https://openalex.org">OpenAlex</a>.
+      <a href="https://www.semanticscholar.org">Semantic Scholar</a> supplies the
+      title match for the paper you search, and for that paper's own citations, the
+      reason each one was cited.</p>
+
+    <h2>Caveats</h2>
+    <p>The tree is a selection, not a bibliography, and the strands are a model's
+      reading of the abstracts. A run takes a few minutes, most of it spent reading
+      the shortlist.</p>
+
+    <h2>Access</h2>
+    <p>TreeXiv is invite-only while it is being built. If you have an account,
+      <a href="/login">sign in</a>. If you were sent an invite link, open it to
+      create one.</p>
+  </main>
+
+  <footer>
+    TreeXiv &middot; <a href="https://github.com/sid19arya/treeXiv">source</a>
+    &middot; data from OpenAlex and Semantic Scholar
+  </footer>
+</div>
+</body>
+</html>

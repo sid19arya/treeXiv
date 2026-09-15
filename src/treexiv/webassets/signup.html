@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The invite code is in this page's URL; keep it out of Referer headers. -->
+<meta name="referrer" content="no-referrer">
+<title>Create an account · TreeXiv</title>
+<link rel="stylesheet" href="/site.css">
+</head>
+<body>
+<div class="page">
+  <header class="top">
+    <a class="wordmark" href="/">TreeXiv</a>
+    <nav><a href="/">About</a><a href="/login">Sign in</a></nav>
+  </header>
+
+  <main>
+    <h1>Create an account</h1>
+
+    <div id="no-invite" hidden>
+      <p>TreeXiv is invite-only. To create an account, open the invite link you
+        were sent. It carries the code this page needs.</p>
+      <p>Already have an account? <a href="/login">Sign in</a>.</p>
+    </div>
+
+    <form class="auth" id="form" hidden>
+      <p class="muted small">Your invite is good for one account.</p>
+      <label for="email">Email</label>
+      <input type="email" id="email" autocomplete="username" required>
+      <label for="password">Password (at least 10 characters)</label>
+      <input type="password" id="password" autocomplete="new-password" minlength="10" required>
+      <label for="confirm">Confirm password</label>
+      <input type="password" id="confirm" autocomplete="new-password" minlength="10" required>
+      <button type="submit" id="submit">Create account</button>
+      <div class="msg" id="msg" role="status"></div>
+    </form>
+  </main>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+  var invite = new URLSearchParams(window.location.search).get("invite") || "";
+
+  if (!invite) { $("no-invite").hidden = false; return; }
+  $("form").hidden = false;
+
+  async function post(path, body) {
+    var deadline = Date.now() + 90000;
+    while (true) {
+      var res = null;
+      try {
+        res = await fetch(path, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+      } catch (e) {}
+      var transient = !res || [404, 502, 503, 504].indexOf(res.status) !== -1;
+      if (transient && Date.now() < deadline) {
+        $("msg").className = "msg";
+        $("msg").textContent = "Waking the server, up to a minute…";
+        await sleep(3000);
+        continue;
+      }
+      if (!res) throw new Error("Can't reach the server.");
+      var data = {};
+      try { data = await res.json(); } catch (e) {}
+      var detail = data.detail;
+      if (Array.isArray(detail)) detail = detail.map(function (d) { return d.msg; }).join("; ");
+      if (!res.ok) throw new Error(detail || (res.status + " " + res.statusText));
+      return data;
+    }
+  }
+
+  $("form").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    if ($("password").value !== $("confirm").value) {
+      $("msg").className = "msg err";
+      $("msg").textContent = "The passwords don't match.";
+      return;
+    }
+    $("submit").disabled = true;
+    $("msg").className = "msg";
+    $("msg").textContent = "Creating your account…";
+    try {
+      await post("/auth/signup", {
+        invite: invite, email: $("email").value, password: $("password").value
+      });
+      window.location.replace("/app");
+    } catch (err) {
+      $("msg").className = "msg err";
+      $("msg").textContent = err.message;
+      $("submit").disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

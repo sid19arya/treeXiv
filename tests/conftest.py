@@ -73,3 +73,7 @@ def isolate_llm_env(monkeypatch) -> None:
     # extra live dependency the BM25/OpenAlex paths shouldn't quietly acquire.
     # Tests that exercise it set TREEXIV_SOURCE themselves.
     monkeypatch.setenv("TREEXIV_SOURCE", "openalex")
+    # And a DATABASE_URL in `.env` must never point the web tests at a real
+    # accounts database; tests/test_web.py sets a throwaway SQLite one.
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("TREEXIV_SESSION_SECRET", "")

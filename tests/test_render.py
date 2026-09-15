@@ -367,3 +367,11 @@ def test_unclustered_papers_stay_visible_alongside_clusters(tmp_path) -> None:
     clusters = _extract_json(html, "CLUSTERS")
     assert all("STRAY" not in c["member_ids"] for c in clusters)
     assert any(n["id"] == "STRAY" for n in _extract_json(html, "NODES"))
+
+
+def test_render_html_title_tag_is_plain_text(tmp_path) -> None:
+    graph = _graph([_node("SEED", 0)], [])
+    html = render_html(graph, tmp_path / "t.html", title="TreeXiv · A & B").read_text(
+        encoding="utf-8"
+    )
+    assert "<title>TreeXiv · A &amp; B</title>" in html
