@@ -13,6 +13,12 @@
   body { margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
   main { max-width: 720px; margin: 0 auto; padding: 32px 20px 80px; }
+  .topbar { display: flex; flex-wrap: wrap; justify-content: space-between;
+    align-items: baseline; gap: 4px 16px; margin: 0 0 4px; }
+  .topbar h1 a { color: inherit; text-decoration: none; }
+  .account { font-size: 13px; color: var(--muted); }
+  .account button.link { background: none; border: 0; padding: 0; color: var(--accent);
+    font-weight: 400; font-size: 13px; text-decoration: underline; cursor: pointer; }
   h1 { font-size: 22px; margin: 0 0 4px; }
   .sub { color: var(--muted); margin: 0 0 28px; font-size: 13px; }
   .step { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -72,7 +78,11 @@
 </head>
 <body>
 <main>
-  <h1>TreeXiv</h1>
+  <div class="topbar">
+    <h1><a href="/">TreeXiv</a></h1>
+    <div class="account"><span id="who"></span>
+      <button type="button" class="link" id="signout-btn">Sign out</button></div>
+  </div>
   <p class="sub">Trace a paper's citation lineage. Search a seed paper, state the idea you
     care about, and get back the strands of how it developed — as a written story and an
     interactive graph.</p>
@@ -171,6 +181,13 @@
         continue;
       }
       if (res.ok) return res.json();
+      // Session expired or account removed: back to the sign-in page. Clear
+      // the cookie first, or /login would see it and bounce straight back.
+      if (res.status === 401) {
+        await fetch("/auth/logout", { method: "POST" }).catch(function () {});
+        window.location.href = "/login";
+        return new Promise(function () {});
+      }
       var transient = [404, 502, 503, 504].indexOf(res.status) !== -1;
       if (transient && Date.now() < deadline) {
         if (onWaking) onWaking();
@@ -190,8 +207,13 @@
     };
   };
 
-  // Kick off spin-up now, while the user is still typing their query.
-  fetch("/health").catch(function () {});
+  api("/api/me").then(function (me) { $("who").textContent = me.email + " · "; })
+    .catch(function () {});
+
+  $("signout-btn").addEventListener("click", async function () {
+    await fetch("/auth/logout", { method: "POST" }).catch(function () {});
+    window.location.href = "/";
+  });
 
   async function runSearch(q) {
     if (q.length < 2) return;

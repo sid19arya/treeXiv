@@ -1,5 +1,9 @@
 /scratch/
 
+# Local-only operator scripts (anything dot-prefixed under scripts/) and
+# whatever they write next to themselves
+/scripts/.*
+
 # Local-only dev guidance, not published
 /CLAUDE.md
 

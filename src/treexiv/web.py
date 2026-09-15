@@ -1,9 +1,10 @@
-"""Private web front-end for the treexiv pipeline.
+"""Web front-end for the treexiv pipeline: a public landing page, and the
+pipeline itself behind invite-only accounts.
 
 This is deliberately outside the Phase 0 CLI/skill scope (see `CLAUDE.md`):
-one module, opt-in via the `web` extra, reusing the exact same package
-functions the CLI does. It exists only to run the pipeline behind a browser
-form on Render's free tier — nothing here changes the core package.
+opt-in via the `web` extra, reusing the exact same package functions the CLI
+does. It exists only to run the pipeline behind a browser form on Render's
+free tier — nothing here changes the core package.
 
 Three routes reach past OpenAlex, all of them optional and all of them
 degrading rather than failing: ``/api/identify`` (Step 0, turns a vague
@@ -18,19 +19,23 @@ curation call. ``_WEB_CURATION_PREFILTER`` trims the shortlist to keep that
 in hand, and a deployment behind a proxy with a request timeout should either
 raise that timeout or run with ``curation: "bm25"``.
 
-Every route except ``/health`` sits behind HTTP Basic Auth
-(``TREEXIV_WEB_USER`` / ``TREEXIV_WEB_PASSWORD`` env vars). Without valid
-credentials a request gets a 401 and the pipeline never runs — no OpenAlex
-calls, no data. ``/health`` is left open so Render's health check works.
+Public: ``/`` (landing page), ``/example`` (one pre-rendered tree), the
+sign-in/sign-up pages, and ``/health``. Everything that runs the pipeline —
+``/app`` and every ``/api/*`` route — needs a signed-in account (see
+`webauth.py`): without one ``/app`` redirects to ``/login`` and the API
+answers 401, so no OpenAlex or LLM call is made for a stranger. Accounts need
+``DATABASE_URL`` and ``TREEXIV_SESSION_SECRET``; with either unset the
+account routes answer 503 and the public pages still load.
 
-Run locally:  ``uv run --extra web uvicorn treexiv.web:app --reload``
+Run locally (any string works as the secret in dev):
+``DATABASE_URL=sqlite:///web.sqlite3 TREEXIV_SESSION_SECRET=dev \\``
+``uv run --extra web uvicorn treexiv.web:app --reload``
 """
 
 from __future__ import annotations
 
 import dataclasses
 import os
-import secrets
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -39,9 +44,8 @@ from pathlib import Path
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, status
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from treexiv.config import Settings
@@ -54,6 +58,20 @@ from treexiv.render import render_html
 from treexiv.seed_llm import identify_seed
 from treexiv.sources.enrich import enrich_expansion, find_seed
 from treexiv.sources.s2 import SemanticScholarClient
+from treexiv.webauth import (
+    SESSION_COOKIE,
+    SESSION_MAX_AGE,
+    AccountError,
+    EmailTaken,
+    InvalidInvite,
+    LoginThrottle,
+    StoreUnavailable,
+    User,
+    UserStore,
+    open_store,
+    read_session,
+    sign_session,
+)
 
 # Hard ceilings on caller-supplied knobs. Even an authenticated request (or a
 # leaked credential) can't turn one call into a multi-thousand-request
@@ -68,36 +86,110 @@ _MAX_CURATION_NODES = 40
 # browser request waiting on a hosted worker is not, so the web caps it lower.
 _WEB_CURATION_PREFILTER = 70
 
-_INDEX_HTML = (resources.files("treexiv") / "webassets" / "index.html").read_text(
-    encoding="utf-8"
-)
+_ASSETS = resources.files("treexiv") / "webassets"
+
+
+def _asset(name: str) -> str:
+    return (_ASSETS / name).read_text(encoding="utf-8")
+
+
+_INDEX_HTML = _asset("index.html")
+_LANDING_HTML = _asset("landing.html")
+_LOGIN_HTML = _asset("login.html")
+_SIGNUP_HTML = _asset("signup.html")
+_SITE_CSS = _asset("site.css")
+# The public example tree is a committed render, not a live run: strangers
+# get to see real output without spending an LLM call.
+_EXAMPLE_HTML = _asset("example.html") if (_ASSETS / "example.html").is_file() else None
 
 app = FastAPI(title="treexiv", docs_url=None, redoc_url=None, openapi_url=None)
-_basic = HTTPBasic()
+_throttle = LoginThrottle()
 
 
-def _require_auth(
-    credentials: Annotated[HTTPBasicCredentials, Depends(_basic)],
-) -> None:
-    """Reject any request whose Basic-Auth credentials don't match the env vars."""
-    expected_user = os.environ.get("TREEXIV_WEB_USER")
-    expected_password = os.environ.get("TREEXIV_WEB_PASSWORD")
-    if not expected_user or not expected_password:
+def _user_store() -> UserStore:
+    url = os.environ.get("DATABASE_URL")
+    if not url:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Auth is not configured (TREEXIV_WEB_USER / TREEXIV_WEB_PASSWORD).",
+            detail="Accounts are not configured (DATABASE_URL).",
         )
-    user_ok = secrets.compare_digest(credentials.username, expected_user)
-    password_ok = secrets.compare_digest(credentials.password, expected_password)
-    if not (user_ok and password_ok):
+    return open_store(url)
+
+
+@app.exception_handler(StoreUnavailable)
+def _store_unavailable(request: Request, exc: StoreUnavailable) -> JSONResponse:
+    return JSONResponse(
+        {"detail": "The accounts database is unavailable — try again shortly."},
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+StoreDep = Annotated[UserStore, Depends(_user_store)]
+
+
+def _session_secret() -> str:
+    secret = os.environ.get("TREEXIV_SESSION_SECRET")
+    if not secret:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials.",
-            headers={"WWW-Authenticate": "Basic"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Accounts are not configured (TREEXIV_SESSION_SECRET).",
         )
+    return secret
 
 
-AuthDep = Annotated[None, Depends(_require_auth)]
+def _current_user(request: Request, store: StoreDep) -> User | None:
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+    user_id = read_session(token, _session_secret())
+    return store.get_user(user_id) if user_id is not None else None
+
+
+def _require_user(user: Annotated[User | None, Depends(_current_user)]) -> User:
+    """No session, a forged one, or a deleted account: 401, and nothing runs."""
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in first.")
+    return user
+
+
+AuthDep = Annotated[User, Depends(_require_user)]
+
+
+def _signed_in(request: Request) -> bool:
+    """For pages that only choose between the app and the sign-in form —
+    never an error, even with accounts unconfigured.
+
+    A validly signed cookie counts as signed in while the database is
+    unreachable: the page loads, and its API calls (which do check the
+    account) wait out the outage instead of bouncing the user to /login.
+    """
+    token = request.cookies.get(SESSION_COOKIE)
+    secret = os.environ.get("TREEXIV_SESSION_SECRET")
+    if not token or not secret:
+        return False
+    user_id = read_session(token, secret)
+    if user_id is None:
+        return False
+    try:
+        return _user_store().get_user(user_id) is not None
+    except StoreUnavailable:
+        return True
+    except HTTPException:
+        return False
+
+
+def _start_session(request: Request, response: Response, user: User) -> None:
+    # Render terminates TLS at its proxy, so the app itself sees plain http;
+    # the forwarded scheme is what the browser actually used.
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    response.set_cookie(
+        SESSION_COOKIE,
+        sign_session(user.id, _session_secret()),
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=scheme == "https",
+        samesite="lax",
+    )
 
 
 def _openalex_client() -> Iterator[OpenAlexClient]:
@@ -178,6 +270,17 @@ def _settings_for(req: RunRequest) -> Settings:
     )
 
 
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class SignupRequest(BaseModel):
+    invite: str = Field(min_length=8, max_length=200)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=256)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """Open, unauthenticated — Render pings this and it exposes nothing."""
@@ -185,8 +288,86 @@ def health() -> dict[str, str]:
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(_: AuthDep) -> HTMLResponse:
+def landing() -> HTMLResponse:
+    return HTMLResponse(_LANDING_HTML)
+
+
+@app.get("/site.css")
+def site_css() -> Response:
+    return Response(_SITE_CSS, media_type="text/css")
+
+
+@app.get("/example", response_class=HTMLResponse)
+def example() -> HTMLResponse:
+    if _EXAMPLE_HTML is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No example yet.")
+    return HTMLResponse(_EXAMPLE_HTML)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request) -> Response:
+    if _signed_in(request):
+        return RedirectResponse("/app", status_code=status.HTTP_303_SEE_OTHER)
+    return HTMLResponse(_LOGIN_HTML)
+
+
+@app.get("/signup", response_class=HTMLResponse)
+def signup_page() -> HTMLResponse:
+    return HTMLResponse(_SIGNUP_HTML)
+
+
+@app.get("/app", response_class=HTMLResponse)
+def index(request: Request) -> Response:
+    if not _signed_in(request):
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     return HTMLResponse(_INDEX_HTML)
+
+
+@app.post("/auth/login")
+def login(request: Request, store: StoreDep, req: LoginRequest) -> JSONResponse:
+    key = req.email.strip().lower()
+    if _throttle.blocked(key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-ins for that email — wait a few minutes.",
+        )
+    user = store.authenticate(req.email, req.password)
+    if user is None:
+        _throttle.failed(key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong email or password."
+        )
+    _throttle.reset(key)
+    response = JSONResponse({"email": user.email})
+    _start_session(request, response, user)
+    return response
+
+
+@app.post("/auth/signup")
+def signup(request: Request, store: StoreDep, req: SignupRequest) -> JSONResponse:
+    try:
+        user = store.signup(req.invite, req.email, req.password)
+    except InvalidInvite as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except EmailTaken as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except AccountError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    response = JSONResponse({"email": user.email})
+    _start_session(request, response, user)
+    return response
+
+
+@app.post("/auth/logout")
+def logout() -> JSONResponse:
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
+@app.get("/api/me")
+def me(user: AuthDep) -> dict[str, str]:
+    return {"email": user.email}
 
 
 @app.post("/api/identify")

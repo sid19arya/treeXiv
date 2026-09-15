@@ -27,7 +27,7 @@ uv sync
 cp .env.example .env   # add your OpenAlex API key (see Configuration below)
 ```
 
-That's it — open the repo in Claude Code and the skill is available automatically. No database, no deployment, nothing else to stand up.
+That's it — open the repo in Claude Code and the skill is available automatically. No database, no deployment, nothing else to stand up (the optional web app is the only part that uses a database, for its accounts).
 
 ## Usage
 
@@ -89,29 +89,33 @@ skip the story) to `run` or `filter`.
 Run `uv run treexiv --help` for the full command list (`identify-seed`,
 `search-seed`, `expand`, `filter`, `render`, `run`).
 
-## Deploy as a private web app (optional)
+## Deploy as a web app (optional)
 
-There's a single-page web front-end (`treexiv.web`, a small FastAPI app) that
-wraps the same pipeline: search a seed (or describe it and let Step 0 guess),
-pick the right match, state the idea, get the HTML back in the browser — with
-the lineage headline and concept strands shown alongside it, and any fallback
+There's a web front-end (`treexiv.web`, a small FastAPI app) that wraps the
+same pipeline: search a seed (or describe it and let Step 0 guess), pick the
+right match, state the idea, get the HTML back in the browser — with the
+lineage headline and concept strands shown alongside it, and any fallback
 (no LLM key, Semantic Scholar rate-limited) reported in the page rather than
 only on a server log.
 
 **One thing to know before deploying:** a curated run takes minutes, dominated
 by the curation call. If your host puts a timeout on inbound requests, either
 raise it or run the web app with the "Keyword top-K" option, which returns in
-seconds. It's
-built to run on [Render](https://render.com)'s free tier and is **private** —
-every route except `/health` is behind HTTP Basic Auth, so without your
-credentials a request gets a `401` and nothing runs.
+seconds.
 
-Run it locally:
+The landing page (`/`) and one pre-rendered example tree (`/example`) are
+public. Running the pipeline is not: `/app` and every `/api/*` route need a
+signed-in account, so a stranger's request gets a `401` and nothing runs.
+Accounts are email + password and **invite-only** — signup needs a single-use
+code from the `invites` table (see `src/treexiv/webauth.py`). Users and
+invites are the only thing the app stores; it keeps no trees or run history.
+
+Run it locally (SQLite stands in for Postgres):
 
 ```bash
 uv sync --extra web
-TREEXIV_WEB_USER=me TREEXIV_WEB_PASSWORD=secret \
-OPENROUTER_API_KEY=sk-or-...  `# optional — enables the "describe it" box` \
+DATABASE_URL=sqlite:///web.sqlite3 TREEXIV_SESSION_SECRET=dev \
+OPENROUTER_API_KEY=sk-or-...  `# optional — curation and the "describe it" box` \
   uv run uvicorn treexiv.web:app --reload
 # open http://127.0.0.1:8000
 ```
@@ -124,13 +128,13 @@ prompted secrets:
 |---|---|
 | `OPENALEX_API_KEY` | your OpenAlex key |
 | `OPENALEX_MAILTO` | your email (OpenAlex polite-pool header) |
-| `TREEXIV_WEB_USER` | any username |
-| `TREEXIV_WEB_PASSWORD` | a long random string — `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
-| `OPENROUTER_API_KEY` | optional — enables the Step 0 "describe the paper" box; leave blank and that one feature returns `501` while everything else works |
+| `DATABASE_URL` | a Postgres connection string; the two tables are created on first use |
+| `TREEXIV_SESSION_SECRET` | generated for you: signs the session cookie, and changing it signs everyone out |
+| `OPENROUTER_API_KEY` | optional — enables curation and the Step 0 "describe the paper" box; leave blank and runs fall back to the keyword filter |
 
-First load prompts for the username/password once; the browser caches it for
-the session. Free-tier services spin down after 15 minutes idle and take
-~1 minute to wake on the next request.
+With `DATABASE_URL` or `TREEXIV_SESSION_SECRET` unset, the public pages still
+load and every account route answers `503`. Free-tier services spin down
+after 15 minutes idle and take ~1 minute to wake on the next request.
 
 Redeploys are driven by GitHub Actions, not by Render watching the branch:
 `.github/workflows/ci.yml` runs ruff and the test suite on every PR, and on

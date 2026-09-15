@@ -28,6 +28,7 @@ the left sidebar when that node is selected.
 from __future__ import annotations
 
 import json
+from html import escape as _html_escape
 from importlib import resources
 from pathlib import Path
 
@@ -256,6 +257,10 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
     seed_node = nodes_by_id.get(graph.seed_id)
 
     html = _TEMPLATE
+    # The <title> tag is HTML text, not script: it gets HTML escaping, not the
+    # JSON literal the inline script uses (which showed as `"..."` in link
+    # previews and anywhere else that reads the tag without running JS).
+    html = html.replace("__PAGE_TITLE_TEXT__", _html_escape(title))
     html = html.replace("__PAGE_TITLE__", _escape_for_inline_script(json.dumps(title)))
     html = html.replace("__IDEA_TEXT__", _escape_for_inline_script(json.dumps(graph.idea_text)))
     html = html.replace("__SEED_ID__", _escape_for_inline_script(json.dumps(graph.seed_id)))
@@ -295,7 +300,7 @@ _TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>__PAGE_TITLE__</title>
+<title>__PAGE_TITLE_TEXT__</title>
 <style>__VIS_NETWORK_CSS__</style>
 <style>
   :root {
