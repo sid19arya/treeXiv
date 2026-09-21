@@ -23,6 +23,12 @@ something the built-in clustering makes hard to guarantee.
 
 Each node also carries a `narrative.describe_relationship` string, shown in
 the left sidebar when that node is selected.
+
+Exhaustive-mode graphs (`curation="jev"`) add two things. Papers found by search
+rather than traversal get their own colour and badge. Edges come in two kinds:
+solid for a real citation, dashed for a relation Jev inferred with no
+citation behind it. When edges are aggregated between collapsed clusters, a
+bundle is drawn solid if any citation is in it, and its tooltip gives both counts.
 """
 
 from __future__ import annotations
@@ -34,12 +40,20 @@ from pathlib import Path
 
 from treexiv.curate import seed_edge_intents
 from treexiv.layout import Position, compute_cluster_layout, compute_positions
-from treexiv.models import Cluster, FilteredGraph, LineageNarrative, Node, ScoredNode
+from treexiv.models import (
+    SEARCH_HOP,
+    Cluster,
+    Edge,
+    FilteredGraph,
+    LineageNarrative,
+    Node,
+    ScoredNode,
+)
 from treexiv.narrative import describe_relationship
 
-_HOP_COLORS = {0: "#f2a900", 1: "#2a9d8f", 2: "#8ecae6"}
+_HOP_COLORS = {0: "#f2a900", 1: "#2a9d8f", 2: "#8ecae6", SEARCH_HOP: "#b8c0ff"}
 _DEFAULT_COLOR = "#cbd5e1"
-_HOP_LABELS = {0: "Seed", 1: "1 hop away", 2: "2 hops away"}
+_HOP_LABELS = {0: "Seed", 1: "1 hop away", 2: "2 hops away", SEARCH_HOP: "Found by search"}
 _SEED_COLOR = "#f2a900"
 _SEED_BORDER = "#7c4a03"
 
@@ -84,9 +98,17 @@ def _escape_for_inline_script(payload: str) -> str:
 
 
 def _node_payload(
-    scored: ScoredNode, is_seed: bool, relationship: str, position: Position, intents: str
+    scored: ScoredNode,
+    is_seed: bool,
+    relationship: str,
+    position: Position,
+    intents: str,
+    curation: str = "bm25",
 ) -> dict:
     node, score = scored.node, scored.score
+    score_text = (
+        f"Jev relevance: {score:.2f} / 4" if curation == "jev" else f"Relevance score: {score:.2f}"
+    )
     return {
         "id": node.id,
         "label": _short_label(node),
@@ -99,6 +121,7 @@ def _node_payload(
         "doi": node.doi,
         "hop": node.hop,
         "score": score,
+        "score_text": score_text,
         "is_seed": is_seed,
         "relationship": relationship,
         "why": scored.why,
@@ -115,6 +138,21 @@ def _node_payload(
         "borderWidth": 3 if is_seed else 1.5,
         "font": {"size": 13 if is_seed else 11},
     }
+
+
+def _edge_payload(edge: Edge) -> dict:
+    """One edge for the page, arrow flipped to earlier -> later (see render_html).
+
+    Kind and relation are only written when present, so citation-only graphs
+    embed the same compact payload they always did.
+    """
+    payload: dict = {"from": edge.target, "to": edge.source}
+    if not edge.is_citation:
+        payload["kind"] = edge.kind
+    if edge.relation:
+        payload["relation"] = edge.relation
+        payload["confidence"] = edge.confidence
+    return payload
 
 
 def _narrative_payload(
@@ -188,10 +226,11 @@ def _cluster_payloads(graph: FilteredGraph) -> tuple[list[dict], dict[str, Posit
     return payloads, positions
 
 
-def _legend(cluster_payloads: list[dict]) -> list[dict]:
+def _legend(cluster_payloads: list[dict], hops: set[int] | None = None) -> list[dict]:
     """Legend entries: cluster roles in the clustered view, hops in the flat one."""
     if not cluster_payloads:
-        return [{"color": _HOP_COLORS[h], "label": _HOP_LABELS[h]} for h in (0, 1, 2)]
+        shown = [0, 1, 2] + ([SEARCH_HOP] if hops and SEARCH_HOP in hops else [])
+        return [{"color": _HOP_COLORS[h], "label": _HOP_LABELS[h]} for h in shown]
     entries = [{"color": _SEED_COLOR, "label": "Seed paper"}]
     seen: set[str] = set()
     for payload in cluster_payloads:
@@ -211,7 +250,14 @@ def _stats_text(graph: FilteredGraph, edge_payloads: list[dict]) -> str:
     Worth being explicit: "top-40 by BM25" and "35 papers an LLM judged
     load-bearing" are very different claims about what the reader is looking at.
     """
-    base = f"{len(graph.nodes)} papers shown · {len(edge_payloads)} citation edges · "
+    inferred = sum(1 for e in edge_payloads if e.get("kind") == "semantic")
+    cited = len(edge_payloads) - inferred
+    base = f"{len(graph.nodes)} papers shown · {cited} citation edges · "
+    if inferred:
+        base += f"{inferred} inferred (dashed) · "
+    if graph.curation == "jev":
+        clusters = f" in {len(graph.clusters)} strands" if graph.clusters else ""
+        return base + f"judged relevant by Jev from citations plus search{clusters}"
     if graph.curation == "llm":
         clusters = f" across {len(graph.clusters)} concept clusters" if graph.clusters else ""
         return base + f"selected as the lineage of the stated idea{clusters}"
@@ -239,6 +285,7 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
             describe_relationship(sn.node.id, graph.seed_id, nodes_by_id, graph.edges),
             positions[sn.node.id],
             intents_by_node.get(sn.node.id, ""),
+            graph.curation,
         )
         for sn in graph.nodes
     ]
@@ -250,9 +297,7 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
     # that". That also lines up with the diagonal layout: arrows flow from
     # top-left toward bottom-right, same as the old -> new axis.
     edge_payloads = [
-        {"from": e.target, "to": e.source}
-        for e in graph.edges
-        if e.source in node_ids and e.target in node_ids
+        _edge_payload(e) for e in graph.edges if e.source in node_ids and e.target in node_ids
     ]
     seed_node = nodes_by_id.get(graph.seed_id)
 
@@ -279,7 +324,9 @@ def render_html(graph: FilteredGraph, out_path: str | Path, title: str = "TreeXi
     )
     html = html.replace(
         "__HOP_LEGEND_JSON__",
-        _escape_for_inline_script(json.dumps(_legend(cluster_payloads))),
+        _escape_for_inline_script(
+            json.dumps(_legend(cluster_payloads, {sn.node.hop for sn in graph.nodes}))
+        ),
     )
     html = html.replace(
         "__NARRATIVE_JSON__",
@@ -445,6 +492,11 @@ _TEMPLATE = r"""<!doctype html>
 (function () {
   var NODES = __NODES_JSON__;
   var EDGES = __EDGES_JSON__;
+  var RELATION_WORDS = {
+    extends: "later paper builds on earlier",
+    applies: "later paper applies earlier",
+    alternative: "later paper is an alternative to earlier"
+  };
   var SEED_ID = __SEED_ID__;
   var SEED_LABEL = __SEED_LABEL__;
   var IDEA_TEXT = __IDEA_TEXT__;
@@ -530,22 +582,37 @@ _TEMPLATE = r"""<!doctype html>
     // papers inside the same collapsed cluster produce a self-loop, which is
     // dropped; several citations between the same pair collapse into one
     // thicker edge rather than a bundle of parallel lines.
+    // Jev-inferred ("semantic") edges are dashed; a bundle is solid as soon
+    // as it holds one real citation.
     var byPair = {};
     EDGES.forEach(function (e) {
       var from = visibleIdFor(e.from);
       var to = visibleIdFor(e.to);
       if (from === to) return;
       var key = from + "|" + to;
-      if (!byPair[key]) byPair[key] = { from: from, to: to, weight: 0 };
+      if (!byPair[key]) byPair[key] = { from: from, to: to, weight: 0, cited: 0, relations: [] };
       byPair[key].weight += 1;
+      if (e.kind !== "semantic") byPair[key].cited += 1;
+      if (e.relation) byPair[key].relations.push(e);
     });
     return Object.keys(byPair).map(function (key) {
       var e = byPair[key];
+      var inferred = e.weight - e.cited;
+      var tip = [];
+      if (e.cited) tip.push(e.cited + (e.cited === 1 ? " citation" : " citations"));
+      if (inferred) tip.push(inferred + " inferred by Jev");
+      if (e.weight === 1 && e.relations.length) {
+        var r = e.relations[0];
+        tip.push("Jev: " + RELATION_WORDS[r.relation] +
+          (r.confidence != null ? " (" + Math.round(r.confidence * 100) + "%)" : ""));
+      }
       return {
         id: key,
         from: e.from,
         to: e.to,
         width: Math.min(1.5 + (e.weight - 1) * 0.9, 7),
+        dashes: e.cited === 0,
+        title: tip.join(" · "),
         label: e.weight > 1 ? String(e.weight) : undefined,
         font: { size: 10, color: "#64748b", strokeWidth: 3, strokeColor: "#f8fafc" }
       };
@@ -805,7 +872,9 @@ _TEMPLATE = r"""<!doctype html>
     showPanel("paper");
     var isSeed = id === SEED_ID;
     document.getElementById("panel-badge").textContent = isSeed
-      ? "Seed paper" : "Hop " + n.hop + (n.hop === 1 ? " — direct neighbor" : " — indirect");
+      ? "Seed paper"
+      : n.hop < 0 ? "Found by search"
+      : "Hop " + n.hop + (n.hop === 1 ? " — direct neighbor" : " — indirect");
     document.getElementById("panel-title").textContent = n.title;
     document.getElementById("panel-authors").textContent = fmtAuthors(n.authors);
     var venueYear = [n.venue, n.publication_year].filter(Boolean).join(" · ");
@@ -813,7 +882,7 @@ _TEMPLATE = r"""<!doctype html>
       venueYear + (venueYear ? " · " : "") + n.cited_by_count + " citations";
     var scoreEl = document.getElementById("panel-score");
     scoreEl.textContent = isSeed
-      ? "Always included as the seed paper" : "Relevance score: " + n.score.toFixed(2);
+      ? "Always included as the seed paper" : n.score_text;
     var doiEl = document.getElementById("panel-doi");
     if (n.doi) {
       doiEl.href = n.doi; doiEl.textContent = n.doi; doiEl.style.display = "inline";

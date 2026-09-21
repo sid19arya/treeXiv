@@ -47,5 +47,15 @@ class SynthesisError(LLMError):
     that can't be parsed into a usable narrative."""
 
 
+class JevError(TreeXivError):
+    """Raised when a Jev evaluation call (Vercel AI Gateway) fails or returns
+    answers that can't be read.
+
+    Deliberately not an `LLMError`: Jev is an evaluation model that returns
+    scores and probabilities, and exhaustive mode treats it as its own
+    dependency with its own key (`AI_GATEWAY_API_KEY`).
+    """
+
+
 class GraphIOError(TreeXivError):
     """Raised when reading/writing expansion or filtered-graph JSON fails."""
