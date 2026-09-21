@@ -57,3 +57,14 @@ button {
 button:disabled { opacity: .5; cursor: default; }
 .msg { font-size: 15px; margin-top: 14px; min-height: 1.4em; }
 .msg.err { color: var(--err); }
+
+/* Landing page: a decorative lineage tree in the right-hand margin. Only
+   shown when the margin is wide enough to hold it clear of the text column. */
+.lineage-art { display: none; }
+@media (min-width: 1160px) {
+  .lineage-art {
+    display: block; position: fixed; top: 0; bottom: 0; right: 0;
+    width: calc((100vw - 680px) / 2 - 40px); max-width: 420px; height: 100vh;
+    padding: 40px 32px 0 0; color: var(--text); pointer-events: none;
+  }
+}
