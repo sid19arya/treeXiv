@@ -401,3 +401,83 @@ def test_search_seed_falls_back_to_openalex_when_s2_is_rate_limited(monkeypatch)
     candidates = json.loads(result.output)
     assert [c["id"] for c in candidates] == ["W1"]
     assert candidates[0]["matched_by"] == "openalex_search"
+
+
+def test_run_exhaustive_mode_requires_a_gateway_key(tmp_path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "run", "W1", "--idea", "x", "--mode", "exhaustive",
+            "--out-json", str(tmp_path / "g.json"), "--out-html", str(tmp_path / "g.html"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "AI_GATEWAY_API_KEY" in result.output
+
+
+@respx.mock
+def test_run_exhaustive_mode_harvests_search_hits_and_renders(tmp_path, monkeypatch) -> None:
+    """End to end with every service mocked: the citation expansion plus an
+    arXiv-only paper go to Jev, and the search hit survives as an inferred edge."""
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "vck-test")
+    monkeypatch.setattr("treexiv.sources.search._ARXIV_MIN_INTERVAL", 0.0)
+    seed = make_work_payload("W1", "Recursive language models", referenced_works=["R1"])
+    ref = make_work_payload("R1", "Early recursion in networks", year=2015)
+    respx.get("https://api.openalex.org/works/W1").mock(return_value=httpx.Response(200, json=seed))
+
+    def openalex_works(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        if params.get("filter", "").startswith("openalex_id:"):
+            return httpx.Response(200, json={"results": [ref]})
+        return httpx.Response(200, json={"results": []})  # citing works and search
+
+    respx.get("https://api.openalex.org/works").mock(side_effect=openalex_works)
+    feed = (
+        "<feed xmlns='http://www.w3.org/2005/Atom'><entry>"
+        "<id>http://arxiv.org/abs/2601.00001v1</id><title>Recursion without citations</title>"
+        "<summary>A parallel take on recursion.</summary>"
+        "<published>2026-01-02T00:00:00Z</published></entry></feed>"
+    )
+    respx.get("https://export.arxiv.org/api/query").mock(return_value=httpx.Response(200, text=feed))
+    respx.get("https://api.crossref.org/works").mock(
+        return_value=httpx.Response(200, json={"message": {"items": []}})
+    )
+
+    def jev_answers(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        answers = {}
+        for key, question in body["questions"].items():
+            if question["type"] == "score":
+                answers[key] = {"type": "score", "score": 3.0}
+            else:
+                answers[key] = {
+                    "type": "choice",
+                    "choice": "extends",
+                    "probabilities": {"extends": 0.9, "unrelated": 0.1},
+                }
+        return httpx.Response(200, json={"answers": answers})
+
+    gateway = respx.post("https://ai-gateway.vercel.sh/v4/ai/evaluation-model").mock(
+        side_effect=jev_answers
+    )
+    out_json, out_html = tmp_path / "g.json", tmp_path / "g.html"
+    result = CliRunner().invoke(
+        main,
+        [
+            "run", "W1", "--idea", "recursion", "--mode", "exhaustive",
+            "--out-json", str(out_json), "--out-html", str(out_html),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert gateway.called
+    assert "Search harvest: openalex 0, arxiv 2, crossref 0 hits -> 1 new papers" in result.output
+    graph = json.loads(out_json.read_text(encoding="utf-8"))
+    assert graph["curation"] == "jev"
+    assert {n["id"] for n in graph["nodes"]} == {"W1", "R1", "arxiv:2601.00001"}
+    assert {"source": "arxiv:2601.00001", "target": "W1", "intents": [],
+            "is_influential": False, "kind": "semantic", "relation": "extends",
+            "confidence": 0.9} in graph["edges"]
+    corpus = json.loads((tmp_path / "g.expansion.json").read_text(encoding="utf-8"))
+    assert any(n["id"] == "arxiv:2601.00001" and n["hop"] == -1 for n in corpus["nodes"])
+    assert out_html.exists()

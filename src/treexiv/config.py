@@ -59,6 +59,30 @@ DEFAULT_S2_KEYED_MIN_INTERVAL = 0.1
 # A ceiling on how much of a run can be spent waiting on S2.
 DEFAULT_S2_REQUEST_BUDGET = 12
 
+# Exhaustive mode (`run --mode exhaustive`, `exhaustive.py`): scholarly search
+# widens the corpus past citation edges, and Jev, an evaluation model on
+# Vercel AI Gateway that returns scores and probabilities rather than text,
+# makes the relevance and relation calls. The LLM only names clusters and
+# writes the story afterwards.
+DEFAULT_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v4/ai"
+DEFAULT_JEV_MODEL = "typesafe-ai/jev"
+# Results per query per search source; two queries (idea, seed title) per source.
+DEFAULT_EXHAUSTIVE_SEARCH_LIMIT = 100
+# Ceiling on candidates Jev scores for relevance, BM25-ordered.
+DEFAULT_EXHAUSTIVE_MAX_CANDIDATES = 1500
+# Papers kept after relevance scoring (seed not counted).
+DEFAULT_EXHAUSTIVE_KEEP = 60
+# Minimum Jev relevance (0-4 rubric) to be kept at all.
+DEFAULT_EXHAUSTIVE_MIN_RELEVANCE = 2.0
+# BM25 neighbours per kept paper whose relation to it Jev judges.
+DEFAULT_EXHAUSTIVE_NEIGHBOURS = 6
+# Probability a relation must reach before it becomes a drawn edge.
+DEFAULT_JEV_EDGE_THRESHOLD = 0.5
+# Questions per Jev request and requests in flight. A request is one state plus
+# a map of questions; 16 papers with trimmed abstracts sit well inside 32k.
+DEFAULT_JEV_BATCH_SIZE = 16
+DEFAULT_JEV_CONCURRENCY = 4
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -127,6 +151,17 @@ class Settings:
     s2_base_url: str = DEFAULT_S2_BASE_URL
     s2_min_interval: float = DEFAULT_S2_MIN_INTERVAL
     s2_request_budget: int = DEFAULT_S2_REQUEST_BUDGET
+    ai_gateway_api_key: str | None = None
+    ai_gateway_base_url: str = DEFAULT_AI_GATEWAY_BASE_URL
+    jev_model: str = DEFAULT_JEV_MODEL
+    jev_batch_size: int = DEFAULT_JEV_BATCH_SIZE
+    jev_concurrency: int = DEFAULT_JEV_CONCURRENCY
+    jev_edge_threshold: float = DEFAULT_JEV_EDGE_THRESHOLD
+    exhaustive_search_limit: int = DEFAULT_EXHAUSTIVE_SEARCH_LIMIT
+    exhaustive_max_candidates: int = DEFAULT_EXHAUSTIVE_MAX_CANDIDATES
+    exhaustive_keep: int = DEFAULT_EXHAUSTIVE_KEEP
+    exhaustive_min_relevance: float = DEFAULT_EXHAUSTIVE_MIN_RELEVANCE
+    exhaustive_neighbours: int = DEFAULT_EXHAUSTIVE_NEIGHBOURS
 
     @property
     def resolved_curation_model(self) -> str:
@@ -144,7 +179,12 @@ class Settings:
         OPENROUTER_BASE_URL, OPENROUTER_MODEL, TREEXIV_LLM_WEB_SEARCH,
         TREEXIV_CURATION, TREEXIV_CURATION_PREFILTER, TREEXIV_CURATION_MAX_NODES,
         TREEXIV_CURATION_MODEL, TREEXIV_NARRATIVE, TREEXIV_SOURCE, S2_API_KEY,
-        S2_BASE_URL, TREEXIV_S2_MIN_INTERVAL, TREEXIV_S2_REQUEST_BUDGET.
+        S2_BASE_URL, TREEXIV_S2_MIN_INTERVAL, TREEXIV_S2_REQUEST_BUDGET,
+        AI_GATEWAY_API_KEY, AI_GATEWAY_BASE_URL, TREEXIV_JEV_MODEL,
+        TREEXIV_JEV_BATCH_SIZE, TREEXIV_JEV_CONCURRENCY, TREEXIV_JEV_EDGE_THRESHOLD,
+        TREEXIV_EXHAUSTIVE_SEARCH_LIMIT, TREEXIV_EXHAUSTIVE_MAX_CANDIDATES,
+        TREEXIV_EXHAUSTIVE_KEEP, TREEXIV_EXHAUSTIVE_MIN_RELEVANCE,
+        TREEXIV_EXHAUSTIVE_NEIGHBOURS.
         """
         load_dotenv()
         s2_key = os.getenv("S2_API_KEY") or None
@@ -183,4 +223,25 @@ class Settings:
             s2_base_url=_env_str("S2_BASE_URL", DEFAULT_S2_BASE_URL),
             s2_min_interval=_env_float("TREEXIV_S2_MIN_INTERVAL", default_interval),
             s2_request_budget=_env_int("TREEXIV_S2_REQUEST_BUDGET", DEFAULT_S2_REQUEST_BUDGET),
+            ai_gateway_api_key=os.getenv("AI_GATEWAY_API_KEY") or None,
+            ai_gateway_base_url=_env_str("AI_GATEWAY_BASE_URL", DEFAULT_AI_GATEWAY_BASE_URL),
+            jev_model=_env_str("TREEXIV_JEV_MODEL", DEFAULT_JEV_MODEL),
+            jev_batch_size=_env_int("TREEXIV_JEV_BATCH_SIZE", DEFAULT_JEV_BATCH_SIZE),
+            jev_concurrency=_env_int("TREEXIV_JEV_CONCURRENCY", DEFAULT_JEV_CONCURRENCY),
+            jev_edge_threshold=_env_float(
+                "TREEXIV_JEV_EDGE_THRESHOLD", DEFAULT_JEV_EDGE_THRESHOLD
+            ),
+            exhaustive_search_limit=_env_int(
+                "TREEXIV_EXHAUSTIVE_SEARCH_LIMIT", DEFAULT_EXHAUSTIVE_SEARCH_LIMIT
+            ),
+            exhaustive_max_candidates=_env_int(
+                "TREEXIV_EXHAUSTIVE_MAX_CANDIDATES", DEFAULT_EXHAUSTIVE_MAX_CANDIDATES
+            ),
+            exhaustive_keep=_env_int("TREEXIV_EXHAUSTIVE_KEEP", DEFAULT_EXHAUSTIVE_KEEP),
+            exhaustive_min_relevance=_env_float(
+                "TREEXIV_EXHAUSTIVE_MIN_RELEVANCE", DEFAULT_EXHAUSTIVE_MIN_RELEVANCE
+            ),
+            exhaustive_neighbours=_env_int(
+                "TREEXIV_EXHAUSTIVE_NEIGHBOURS", DEFAULT_EXHAUSTIVE_NEIGHBOURS
+            ),
         )

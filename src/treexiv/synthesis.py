@@ -16,6 +16,11 @@ path is derived.
 
 Synthesis is best-effort. `synthesize_lineage` raises `SynthesisError` on any
 problem and `filtering.build_graph` carries on with the graph unannotated.
+
+`name_clusters` serves exhaustive mode (`exhaustive.py`), where the clusters
+come from Jev's relation judgments rather than from an LLM. The strands exist
+before any model sees them, and this call only puts words to them: a name
+and a one-line summary each. It never moves a paper between strands.
 """
 
 from __future__ import annotations
@@ -62,6 +67,92 @@ Rules:
   rather than asserting who cited whom.
 - Be specific about mechanisms and results, not about importance. "Replaced the
   learned router with a k-NN baseline and matched it" beats "was influential"."""
+
+
+_NAMING_PROMPT = """\
+You name the strands of a research lineage map. The papers were already grouped
+into strands by how they relate to each other; your only job is to put words to
+each group.
+
+You will get the idea the reader cares about and a numbered list of strands,
+each with some of its papers. For every strand, write a name and a summary.
+
+Respond with ONLY a JSON object, no prose or code fences:
+{
+  "clusters": [
+    {"id": <strand number>, "name": "short strand name (2-5 words)",
+     "summary": "one sentence: what this strand contributes to the idea's story"}
+  ]
+}
+
+Rules:
+- "id" must be a strand number from the list. Never invent one.
+- A name is a distinct strand of the story ("early sparse-attention
+  approximations", "scaling-law follow-ups"), not a date range and not a title
+  copied from one paper.
+- Only say what the listed titles support."""
+
+# Papers shown per strand when naming it: enough to see the common thread.
+_NAMING_PAPERS_PER_CLUSTER = 8
+
+
+def name_clusters(
+    graph: FilteredGraph,
+    settings: Settings,
+    *,
+    http_client: httpx.Client | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Name and summarise `graph`'s clusters, keyed by cluster ID.
+
+    The catch-all "other" cluster is left out. Raises `SynthesisError` if the
+    call fails or names nothing recognizable.
+    """
+    members: dict[str, list[ScoredNode]] = {}
+    for scored in graph.nodes:
+        if scored.cluster_id and scored.cluster_id != "other":
+            members.setdefault(scored.cluster_id, []).append(scored)
+    namable = [c for c in graph.clusters if c.id in members]
+    if not namable:
+        raise SynthesisError("Graph has no clusters to name.")
+
+    index_to_id: dict[int, str] = {}
+    blocks: list[str] = []
+    for i, cluster in enumerate(namable, start=1):
+        index_to_id[i] = cluster.id
+        shown = sorted(members[cluster.id], key=lambda sn: sn.score, reverse=True)
+        lines = [
+            f"  - {sn.node.publication_year or 'n.d.'} — {sn.node.title}"
+            for sn in shown[:_NAMING_PAPERS_PER_CLUSTER]
+        ]
+        extra = len(shown) - _NAMING_PAPERS_PER_CLUSTER
+        if extra > 0:
+            lines.append(f"  - …and {extra} more")
+        header = f"[{i}] ({cluster.role}, {len(shown)} papers)"
+        blocks.append("\n".join([header, *lines]))
+
+    strands = "\n\n".join(blocks)
+    user = f"THE IDEA THE READER CARES ABOUT: {graph.idea_text}\n\nSTRANDS:\n{strands}"
+    result = chat_json(
+        settings,
+        [{"role": "system", "content": _NAMING_PROMPT}, {"role": "user", "content": user}],
+        model=settings.resolved_curation_model,
+        temperature=0.2,
+        http_client=http_client,
+        error_cls=SynthesisError,
+    )
+
+    named: dict[str, tuple[str, str]] = {}
+    for item in result.data.get("clusters") or []:
+        if not isinstance(item, dict):
+            continue
+        index = coerce_int(item.get("id"))
+        cluster_id = index_to_id.get(index) if index is not None else None
+        name = clean_str(item.get("name"))
+        if cluster_id and name:
+            named[cluster_id] = (name, clean_str(item.get("summary")) or "")
+    if not named:
+        raise SynthesisError(f"Naming reply named no known strand: {str(result.data)[:300]}")
+    return named
 
 
 def _paper_lines(

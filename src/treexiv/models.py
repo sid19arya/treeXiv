@@ -10,11 +10,13 @@ minimal per the project's phase-0 conventions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from treexiv.abstract import reconstruct_abstract
 
 OPENALEX_URL_PREFIX = "https://openalex.org/"
+# `Node.hop` for a paper found by search rather than citation traversal.
+SEARCH_HOP = -1
 
 
 def normalize_work_id(raw_id: str) -> str:
@@ -137,7 +139,11 @@ def _openalex_external_ids(payload: dict) -> dict[str, str]:
 @dataclass(slots=True)
 class Node:
     """A graph node: a `Work` reduced to what the corpus/render steps need,
-    plus its hop distance from the seed."""
+    plus its hop distance from the seed.
+
+    `hop` is `SEARCH_HOP` (-1) for a paper exhaustive mode found by search
+    rather than by traversal: it has no known citation path to the seed.
+    """
 
     id: str
     title: str
@@ -199,15 +205,28 @@ class Node:
         )
 
 
+EDGE_CITATION = "citation"
+EDGE_SEMANTIC = "semantic"
+
+
 @dataclass(slots=True, frozen=True)
 class Edge:
-    """A citation edge: `source` cites `target` (source is the citing work).
+    """A graph edge: `source` cites `target` (source is the citing work).
 
     `intents` and `is_influential` come from Semantic Scholar's classification
     of the citation context, and are only populated for edges S2 was asked
     about — in practice the seed paper's own references and citations. An edge
     discovered by OpenAlex traversal carries no intent, which is a gap in what
     we know about it, not a claim that the citation is incidental.
+
+    `kind` separates what the data says from what was inferred. A "citation"
+    edge is a real reference. A "semantic" edge exists only in exhaustive mode:
+    Jev judged the later paper to stand in `relation` (extends / applies /
+    alternative) to the earlier one with probability `confidence`, and there
+    may be no citation between them at all. Semantic edges keep the same
+    orientation — `source` is the later paper — so the renderer's arrow flip
+    treats both kinds alike. A citation edge can carry a `relation` too, when
+    Jev was asked about that pair.
 
     A tuple, not a list, so the dataclass stays hashable and cheap to dedupe.
     """
@@ -216,22 +235,35 @@ class Edge:
     target: str
     intents: tuple[str, ...] = ()
     is_influential: bool = False
+    kind: str = EDGE_CITATION
+    relation: str = ""
+    confidence: float | None = None
+
+    @property
+    def is_citation(self) -> bool:
+        return self.kind == EDGE_CITATION
 
     def with_intents(self, intents: tuple[str, ...], is_influential: bool) -> Edge:
-        return Edge(
-            source=self.source,
-            target=self.target,
-            intents=intents,
-            is_influential=is_influential,
-        )
+        return replace(self, intents=intents, is_influential=is_influential)
+
+    def with_relation(self, relation: str, confidence: float) -> Edge:
+        return replace(self, relation=relation, confidence=confidence)
 
     def to_dict(self) -> dict:
-        return {
+        out: dict = {
             "source": self.source,
             "target": self.target,
             "intents": list(self.intents),
             "is_influential": self.is_influential,
         }
+        # Only written when set, so citation-only runs keep their old JSON shape.
+        if self.kind != EDGE_CITATION:
+            out["kind"] = self.kind
+        if self.relation:
+            out["relation"] = self.relation
+        if self.confidence is not None:
+            out["confidence"] = self.confidence
+        return out
 
     @classmethod
     def from_dict(cls, payload: dict) -> Edge:
@@ -240,6 +272,9 @@ class Edge:
             target=payload["target"],
             intents=tuple(payload.get("intents") or ()),
             is_influential=payload.get("is_influential", False),
+            kind=payload.get("kind", EDGE_CITATION),
+            relation=payload.get("relation", ""),
+            confidence=payload.get("confidence"),
         )
 
 

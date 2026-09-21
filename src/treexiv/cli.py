@@ -13,6 +13,11 @@ step that reaches for an LLM: it turns a vague description into a title worth
 searching by calling a web-search-grounded OpenRouter model, since plain
 OpenAlex title search can't bridge that gap. It's still only a lead —
 `search-seed` and the usual disambiguation run after it.
+
+`run --mode exhaustive` swaps steps 3-4 for exhaustive mode (`exhaustive.py`):
+scholarly search widens the corpus past citation edges, and Jev, an evaluation
+model, makes the relevance and relation calls. The LLM only names the strands
+and writes the story afterwards.
 """
 
 from __future__ import annotations
@@ -20,13 +25,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 import click
 
 from treexiv.cache import WorkCache
 from treexiv.config import Settings
-from treexiv.exceptions import TreeXivError
+from treexiv.exceptions import JevError, TreeXivError
+from treexiv.exhaustive import build_exhaustive_graph
 from treexiv.expand import expand_two_hop
 from treexiv.filtering import build_graph
 from treexiv.models import ExpansionResult, FilteredGraph, Work
@@ -34,6 +41,8 @@ from treexiv.openalex import OpenAlexClient
 from treexiv.render import render_html
 from treexiv.seed_llm import identify_seed
 from treexiv.sources.enrich import enrich_expansion, find_seed
+from treexiv.sources.s2 import SemanticScholarClient
+from treexiv.sources.search import harvest_into
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -74,7 +83,9 @@ def _warn(message: str) -> None:
 
 def _describe_graph(graph: FilteredGraph) -> str:
     """One-line summary of what filtering produced, for stderr."""
-    how = "LLM-curated" if graph.curation == "llm" else "BM25 top-K"
+    how = {"llm": "LLM-curated", "jev": "Jev-judged (exhaustive)"}.get(
+        graph.curation, "BM25 top-K"
+    )
     clusters = f", {len(graph.clusters)} concept clusters" if graph.clusters else ""
     story = f", narrative in {len(graph.narrative.beats)} beats" if graph.narrative else ""
     return f"{how}: {len(graph.nodes)} nodes, {len(graph.edges)} edges{clusters}{story}"
@@ -322,6 +333,29 @@ def render_cmd(filtered_json: Path, out_path: Path, title: str) -> None:
 @_MAX_NODES_OPTION
 @_NARRATIVE_OPTION
 @_SOURCE_OPTION
+@click.option(
+    "--mode",
+    type=click.Choice(["standard", "exhaustive"]),
+    default="standard",
+    show_default=True,
+    help=(
+        "'exhaustive' adds scholarly search (OpenAlex, arXiv, Crossref, S2) to the "
+        "citation expansion and lets Jev pick and relate papers; needs AI_GATEWAY_API_KEY. "
+        "--curation, --top-k and --max-nodes don't apply to it."
+    ),
+)
+@click.option(
+    "--keep",
+    type=int,
+    default=None,
+    help="Exhaustive mode: papers Jev may keep (default 60).",
+)
+@click.option(
+    "--search-limit",
+    type=int,
+    default=None,
+    help="Exhaustive mode: results per query per search source (default 100).",
+)
 @click.option("--cache-dir", default=None)
 @click.option(
     "--out-json", required=True, type=click.Path(path_type=Path), help="Filtered graph JSON output."
@@ -353,6 +387,9 @@ def run_cmd(
     max_nodes: int | None,
     narrative: bool | None,
     source: str | None,
+    mode: str,
+    keep: int | None,
+    search_limit: int | None,
     cache_dir: str | None,
     out_json: Path,
     out_expansion: Path | None,
@@ -368,14 +405,48 @@ def run_cmd(
     settings = _settings_from_options(
         total_cap, fanout_cap, sampling, top_k, cache_dir, curation, max_nodes, narrative, source
     )
-    with OpenAlexClient(settings) as client:
+    exhaustive = mode == "exhaustive"
+    if exhaustive:
+        if not settings.ai_gateway_api_key:
+            raise click.UsageError(
+                "--mode exhaustive needs AI_GATEWAY_API_KEY (Jev via Vercel AI Gateway). "
+                "See .env.example."
+            )
+        settings = dataclasses.replace(
+            settings,
+            exhaustive_keep=keep if keep is not None else settings.exhaustive_keep,
+            exhaustive_search_limit=(
+                search_limit if search_limit is not None else settings.exhaustive_search_limit
+            ),
+        )
+    harvest_note = ""
+    with ExitStack() as stack:
+        client = stack.enter_context(OpenAlexClient(settings))
         seed_work = client.get_work(work_id)
         cache = WorkCache(settings.cache_dir, seed_id=seed_work.id)
         expansion = expand_two_hop(
             client, settings, seed_work, cache=cache, sample_seed=sample_seed
         )
         report = enrich_expansion(expansion, seed_work, client, settings, on_warning=_warn)
-    filtered = build_graph(expansion, idea, settings, on_warning=_warn)
+        if exhaustive:
+            s2 = (
+                stack.enter_context(SemanticScholarClient(settings))
+                if settings.source_mode != "openalex"
+                else None
+            )
+            harvest = harvest_into(
+                expansion, seed_work.title, idea, settings, client, s2=s2, on_warning=_warn
+            )
+            harvest_note = "\n" + harvest.summary()
+
+    if exhaustive:
+        try:
+            filtered = build_exhaustive_graph(expansion, idea, settings, on_warning=_warn)
+        except JevError as exc:
+            _warn(f"Jev judging failed ({exc}) — falling back to the standard filter.")
+            filtered = build_graph(expansion, idea, settings, on_warning=_warn)
+    else:
+        filtered = build_graph(expansion, idea, settings, on_warning=_warn)
 
     expansion_path = out_expansion or out_json.with_name(out_json.stem + ".expansion.json")
     _write_json(expansion_path, expansion.to_dict())
@@ -384,7 +455,7 @@ def run_cmd(
     click.echo(
         f"{seed_work.title!r}: {len(expansion.nodes)} expanded -> {_describe_graph(filtered)}"
         f"{' (expansion truncated by cap)' if expansion.truncated else ''}\n"
-        f"{chr(10) + report.summary() if report.attempted else ''}\n"
+        f"{chr(10) + report.summary() if report.attempted else ''}{harvest_note}\n"
         f"Full expansion JSON: {expansion_path}\nFiltered JSON: {out_json}\nHTML: {written}",
         err=True,
     )

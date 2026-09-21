@@ -375,3 +375,38 @@ def test_render_html_title_tag_is_plain_text(tmp_path) -> None:
         encoding="utf-8"
     )
     assert "<title>TreeXiv · A &amp; B</title>" in html
+
+
+def test_render_html_marks_inferred_edges_and_search_found_papers(tmp_path) -> None:
+    """Exhaustive-mode graphs: a Jev-inferred edge is flagged for dashing, a
+    citation annotated by Jev keeps its citation kind, and the stats line
+    counts the two apart."""
+    graph = _graph(
+        [_node("SEED", 0, 2020), _node("OLD", 1, 2015), _node("SIB", -1, 2022)],
+        [
+            Edge("SEED", "OLD", relation="extends", confidence=0.8),
+            Edge("SIB", "SEED", kind="semantic", relation="alternative", confidence=0.7),
+        ],
+    )
+    graph.curation = "jev"
+    out_path = tmp_path / "tree.html"
+    render_html(graph, out_path)
+    content = out_path.read_text(encoding="utf-8")
+    edges = _extract_json(content, "EDGES")
+    assert edges == [
+        {"from": "OLD", "to": "SEED", "relation": "extends", "confidence": 0.8},
+        {
+            "from": "SEED",
+            "to": "SIB",
+            "kind": "semantic",
+            "relation": "alternative",
+            "confidence": 0.7,
+        },
+    ]
+    assert "1 citation edges" in content and "1 inferred (dashed)" in content
+    assert "judged relevant by Jev" in content
+    nodes = {n["id"]: n for n in _extract_json(content, "NODES")}
+    assert nodes["SIB"]["score_text"] == "Jev relevance: 1.00 / 4"
+    assert "No citation links this paper" in nodes["SIB"]["relationship"]
+    legend = _extract_json(content, "HOP_LEGEND")
+    assert {"color": "#b8c0ff", "label": "Found by search"} in legend

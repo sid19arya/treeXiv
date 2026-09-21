@@ -204,3 +204,18 @@ def test_filtered_graph_without_a_narrative_round_trips_as_none() -> None:
     graph = FilteredGraph(seed_id="SEED", idea_text="idea", top_k=0, nodes=[], edges=[])
     assert graph.to_dict()["narrative"] is None
     assert FilteredGraph.from_dict(graph.to_dict()).narrative is None
+
+
+def test_semantic_edge_round_trips_and_plain_edges_keep_their_old_shape() -> None:
+    semantic = Edge("B", "A", kind="semantic", relation="extends", confidence=0.7)
+    payload = semantic.to_dict()
+    assert payload["kind"] == "semantic"
+    assert Edge.from_dict(payload) == semantic
+    assert not semantic.is_citation
+    assert set(Edge("B", "A").to_dict()) == {"source", "target", "intents", "is_influential"}
+    annotated = Edge("B", "A").with_relation("applies", 0.6).with_intents(("background",), True)
+    assert (annotated.relation, annotated.intents, annotated.is_citation) == (
+        "applies",
+        ("background",),
+        True,
+    )

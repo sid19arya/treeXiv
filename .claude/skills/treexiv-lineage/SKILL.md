@@ -106,6 +106,19 @@ Useful overrides (all optional):
   (every node/edge the traversal collected, not just the survivors). Defaults
   to `<out-json stem>.expansion.json` and is always written.
 
+**Exhaustive mode** (`--mode exhaustive`) is for when the user wants breadth,
+meaning work that never cited the seed, or asks for "everything related". It adds
+scholarly search (OpenAlex, arXiv, Crossref, S2) to the traversal and has Jev,
+an evaluation model on Vercel AI Gateway, score relevance and judge relations.
+The LLM only names strands and writes the story. It needs `AI_GATEWAY_API_KEY`
+(it exits with a usage error without one). `--keep N` caps the papers kept
+(default 60) and `--search-limit N` sets hits per query per source (default 100).
+Dashed edges in its output are Jev inferences, not citations. Say so when you
+report them, and never describe one as "X cites Y". Its stderr adds a
+`Search harvest: ...` line (hits per source, how many were new), and a
+`Jev judging failed ... falling back` warning means the user got the
+standard filter over the widened corpus instead.
+
 **Watch stderr.** The run reports what actually happened, and some of it
 changes what the output means:
 - `LLM-curated: N nodes, ... concept clusters, narrative in N beats` — the

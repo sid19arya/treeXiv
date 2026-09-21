@@ -63,6 +63,7 @@ def isolate_llm_env(monkeypatch) -> None:
     for var in (
         "OPENROUTER_API_KEY",
         "S2_API_KEY",
+        "AI_GATEWAY_API_KEY",
         "TREEXIV_CURATION",
         "TREEXIV_CURATION_PREFILTER",
         "TREEXIV_CURATION_MAX_NODES",

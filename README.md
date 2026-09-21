@@ -177,6 +177,31 @@ commit — re-run the workflow (or deploy by hand) after resuming.
    rather than the papers — a handful of named strands — and you expand the
    ones you care about.
 
+## Exhaustive mode
+
+`treexiv run <WORK_ID> --idea "..." --mode exhaustive ...` is a second path.
+It swaps out steps 3 and 4:
+
+- **A wider corpus.** On top of the citation expansion, it runs scholarly
+  search (OpenAlex, arXiv, Crossref, and Semantic Scholar when available) for
+  the idea and the seed title, and merges the hits by DOI, arXiv ID, or title.
+  Papers that never cite the seed can now make the map.
+- **Decisions by an evaluation model, not a chat model.**
+  [Jev](https://vercel.com/ai-gateway/models/jev), through Vercel AI Gateway,
+  returns scores and probabilities rather than text. It rates every candidate
+  0-4 for relevance to your idea, then judges how nearby pairs relate (extends,
+  applies, alternative approach, loosely related, unrelated). Strands come from
+  clustering those judgments. No model is asked to cluster.
+- **An LLM only for words.** If `OPENROUTER_API_KEY` is set, a model names the
+  strands and writes the story afterwards. Without it, strands get keyword
+  names.
+
+Relations Jev infers between papers with no citation between them are drawn
+as **dashed** edges, and the sidebar calls them inferred, never "cites".
+Search-found papers get their own colour. Exhaustive mode needs
+`AI_GATEWAY_API_KEY`. If Jev fails mid-run, the run falls back to the standard
+filter over the same widened corpus.
+
 ## What you get
 
 - **The lineage story in the sidebar** — headline, overview, and the beats of
@@ -230,6 +255,15 @@ handful of requests:
 | `TREEXIV_BM25_TOP_K` | How many papers survive the BM25 fallback filter (default 40) |
 | `TREEXIV_SAMPLING_STRATEGY` | `top_cited` (default, favors established papers) or `random` (favors catching less-cited, divergent branches) |
 | `TREEXIV_CACHE_DIR` | If set, caches fetched papers per seed so repeat runs don't re-hit the API |
+| `AI_GATEWAY_API_KEY` | Required for `--mode exhaustive` (Jev via Vercel AI Gateway) |
+| `TREEXIV_JEV_MODEL` | Evaluation model slug (default `typesafe-ai/jev`) |
+| `TREEXIV_EXHAUSTIVE_KEEP` | Papers exhaustive mode may keep (default 60; `--keep`) |
+| `TREEXIV_EXHAUSTIVE_MIN_RELEVANCE` | Minimum Jev relevance, 0-4, to be kept (default 2.0) |
+| `TREEXIV_EXHAUSTIVE_SEARCH_LIMIT` | Results per query per search source (default 100; `--search-limit`) |
+| `TREEXIV_EXHAUSTIVE_MAX_CANDIDATES` | Ceiling on papers Jev scores (default 1500) |
+| `TREEXIV_EXHAUSTIVE_NEIGHBOURS` | Nearest neighbours per kept paper whose relation Jev judges (default 6) |
+| `TREEXIV_JEV_EDGE_THRESHOLD` | Probability a Jev relation needs to be drawn as an edge (default 0.5) |
+| `TREEXIV_JEV_BATCH_SIZE` / `TREEXIV_JEV_CONCURRENCY` | Questions per Jev request / requests in flight (default 16 / 4) |
 
 ## Design notes
 
